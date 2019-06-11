@@ -5,17 +5,17 @@ use futures::{Async, Future, Poll, Stream};
 use http::{Request, Response, StatusCode};
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use body::{Body, Payload};
-use body::internal::FullDataArg;
-use common::Never;
-use proto::{BodyLength, DecodedLength, Conn, Dispatched, MessageHead, RequestHead, RequestLine, ResponseHead};
+use crate::body::{Body, Payload};
+use crate::body::internal::FullDataArg;
+use crate::common::Never;
+use crate::proto::{BodyLength, DecodedLength, Conn, Dispatched, MessageHead, RequestHead, RequestLine, ResponseHead};
 use super::Http1Transaction;
-use service::Service;
+use crate::service::Service;
 
 pub(crate) struct Dispatcher<D, Bs: Payload, I, T> {
     conn: Conn<I, Bs::Data, T>,
     dispatch: D,
-    body_tx: Option<::body::Sender>,
+    body_tx: Option<crate::body::Sender>,
     body_rx: Option<Bs>,
     is_closing: bool,
 }
@@ -26,7 +26,7 @@ pub(crate) trait Dispatch {
     type PollError;
     type RecvItem;
     fn poll_msg(&mut self) -> Poll<Option<(Self::PollItem, Self::PollBody)>, Self::PollError>;
-    fn recv_msg(&mut self, msg: ::Result<(Self::RecvItem, Body)>) -> ::Result<()>;
+    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()>;
     fn poll_ready(&mut self) -> Poll<(), ()>;
     fn should_poll(&self) -> bool;
 }
@@ -37,11 +37,11 @@ pub struct Server<S: Service> {
 }
 
 pub struct Client<B> {
-    callback: Option<::client::dispatch::Callback<Request<B>, Response<Body>>>,
+    callback: Option<crate::client::dispatch::Callback<Request<B>, Response<Body>>>,
     rx: ClientRx<B>,
 }
 
-type ClientRx<B> = ::client::dispatch::Receiver<Request<B>, Response<Body>>;
+type ClientRx<B> = crate::client::dispatch::Receiver<Request<B>, Response<Body>>;
 
 impl<D, Bs, I, T> Dispatcher<D, Bs, I, T>
 where
@@ -75,7 +75,7 @@ where
     ///
     /// This is useful for old-style HTTP upgrades, but ignores
     /// newer-style upgrade API.
-    pub fn poll_without_shutdown(&mut self) -> Poll<(), ::Error> {
+    pub fn poll_without_shutdown(&mut self) -> Poll<(), crate::Error> {
         self.poll_catch(false)
             .map(|x| {
                 x.map(|ds| if let Dispatched::Upgrade(pending) = ds {
@@ -84,7 +84,7 @@ where
             })
     }
 
-    fn poll_catch(&mut self, should_shutdown: bool) -> Poll<Dispatched, ::Error> {
+    fn poll_catch(&mut self, should_shutdown: bool) -> Poll<Dispatched, crate::Error> {
         self.poll_inner(should_shutdown).or_else(|e| {
             // An error means we're shutting down either way.
             // We just try to give the error to the user,
@@ -95,7 +95,7 @@ where
         })
     }
 
-    fn poll_inner(&mut self, should_shutdown: bool) -> Poll<Dispatched, ::Error> {
+    fn poll_inner(&mut self, should_shutdown: bool) -> Poll<Dispatched, crate::Error> {
         T::update_date();
 
         loop {
@@ -121,7 +121,7 @@ where
                 self.conn.take_error()?;
                 return Ok(Async::Ready(Dispatched::Upgrade(pending)));
             } else if should_shutdown {
-                try_ready!(self.conn.shutdown().map_err(::Error::new_shutdown));
+                try_ready!(self.conn.shutdown().map_err(crate::Error::new_shutdown));
             }
             self.conn.take_error()?;
             Ok(Async::Ready(Dispatched::Shutdown))
@@ -130,7 +130,7 @@ where
         }
     }
 
-    fn poll_read(&mut self) -> Poll<(), ::Error> {
+    fn poll_read(&mut self) -> Poll<(), crate::Error> {
         loop {
             if self.is_closing {
                 return Ok(Async::Ready(()));
@@ -174,7 +174,7 @@ where
                             return Ok(Async::NotReady);
                         }
                         Err(e) => {
-                            body.send_error(::Error::new_body(e));
+                            body.send_error(crate::Error::new_body(e));
                         }
                     }
                 } else {
@@ -186,7 +186,7 @@ where
         }
     }
 
-    fn poll_read_head(&mut self) -> Poll<(), ::Error> {
+    fn poll_read_head(&mut self) -> Poll<(), crate::Error> {
         // can dispatch receive, or does it still care about, an incoming message?
         match self.dispatch.poll_ready() {
             Ok(Async::Ready(())) => (),
@@ -230,12 +230,12 @@ where
         }
     }
 
-    fn poll_write(&mut self) -> Poll<(), ::Error> {
+    fn poll_write(&mut self) -> Poll<(), crate::Error> {
         loop {
             if self.is_closing {
                 return Ok(Async::Ready(()));
             } else if self.body_rx.is_none() && self.conn.can_write_head() && self.dispatch.should_poll() {
-                if let Some((head, mut body)) = try_ready!(self.dispatch.poll_msg().map_err(::Error::new_user_service)) {
+                if let Some((head, mut body)) = try_ready!(self.dispatch.poll_msg().map_err(crate::Error::new_user_service)) {
                     // Check if the body knows its full data immediately.
                     //
                     // If so, we can skip a bit of bookkeeping that streaming
@@ -269,7 +269,7 @@ where
                     );
                     continue;
                 }
-                match body.poll_data().map_err(::Error::new_user_body)? {
+                match body.poll_data().map_err(crate::Error::new_user_body)? {
                     Async::Ready(Some(chunk)) => {
                         let eos = body.is_end_stream();
                         if eos {
@@ -302,10 +302,10 @@ where
         }
     }
 
-    fn poll_flush(&mut self) -> Poll<(), ::Error> {
+    fn poll_flush(&mut self) -> Poll<(), crate::Error> {
         self.conn.flush().map_err(|err| {
             debug!("error writing: {}", err);
-            ::Error::new_body_write(err)
+            crate::Error::new_body_write(err)
         })
     }
 
@@ -342,7 +342,7 @@ where
     Bs: Payload,
 {
     type Item = Dispatched;
-    type Error = ::Error;
+    type Error = crate::Error;
 
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
@@ -396,7 +396,7 @@ where
         }
     }
 
-    fn recv_msg(&mut self, msg: ::Result<(Self::RecvItem, Body)>) -> ::Result<()> {
+    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
         let (msg, body) = msg?;
         let mut req = Request::new(body);
         *req.method_mut() = msg.subject.0;
@@ -476,7 +476,7 @@ where
         }
     }
 
-    fn recv_msg(&mut self, msg: ::Result<(Self::RecvItem, Body)>) -> ::Result<()> {
+    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
         match msg {
             Ok((msg, body)) => {
                 if let Some(cb) = self.callback.take() {
@@ -490,7 +490,7 @@ where
                     // Getting here is likely a bug! An error should have happened
                     // in Conn::require_empty_read() before ever parsing a
                     // full message!
-                    Err(::Error::new_unexpected_message())
+                    Err(crate::Error::new_unexpected_message())
                 }
             },
             Err(err) => {
@@ -501,7 +501,7 @@ where
                     trace!("canceling queued request with connection error: {}", err);
                     // in this case, the message was never even started, so it's safe to tell
                     // the user that the request was completely canceled
-                    let _ = cb.send(Err((::Error::new_canceled().with(err), Some(req))));
+                    let _ = cb.send(Err((crate::Error::new_canceled().with(err), Some(req))));
                     Ok(())
                 } else {
                     Err(err)
@@ -534,8 +534,8 @@ mod tests {
     extern crate pretty_env_logger;
 
     use super::*;
-    use mock::AsyncIo;
-    use proto::h1::ClientTransaction;
+    use crate::mock::AsyncIo;
+    use crate::proto::h1::ClientTransaction;
 
     #[test]
     fn client_read_bytes_before_writing_request() {
@@ -544,8 +544,8 @@ mod tests {
             // Block at 0 for now, but we will release this response before
             // the request is ready to write later...
             let io = AsyncIo::new_buf(b"HTTP/1.1 200 OK\r\n\r\n".to_vec(), 0);
-            let (mut tx, rx) = ::client::dispatch::channel();
-            let conn = Conn::<_, ::Chunk, ClientTransaction>::new(io);
+            let (mut tx, rx) = crate::client::dispatch::channel();
+            let conn = Conn::<_, crate::Chunk, ClientTransaction>::new(io);
             let mut dispatcher = Dispatcher::new(Client::new(rx), conn);
 
             // First poll is needed to allow tx to send...
@@ -553,7 +553,7 @@ mod tests {
             // Unblock our IO, which has a response before we've sent request!
             dispatcher.conn.io_mut().block_in(100);
 
-            let res_rx = tx.try_send(::Request::new(::Body::empty())).unwrap();
+            let res_rx = tx.try_send(crate::Request::new(crate::Body::empty())).unwrap();
 
             let a1 = dispatcher.poll().expect("error should be sent on channel");
             assert!(a1.is_ready(), "dispatcher should be closed");
@@ -562,7 +562,7 @@ mod tests {
                 .expect_err("callback response");
 
             match (err.0.kind(), err.1) {
-                (&::error::Kind::Canceled, Some(_)) => (),
+                (&crate::error::Kind::Canceled, Some(_)) => (),
                 other => panic!("expected Canceled, got {:?}", other),
             }
             Ok::<(), ()>(())
@@ -574,16 +574,16 @@ mod tests {
         let _ = pretty_env_logger::try_init();
         ::futures::lazy(|| {
             let io = AsyncIo::new_buf(vec![], 0);
-            let (mut tx, rx) = ::client::dispatch::channel();
-            let conn = Conn::<_, ::Chunk, ClientTransaction>::new(io);
+            let (mut tx, rx) = crate::client::dispatch::channel();
+            let conn = Conn::<_, crate::Chunk, ClientTransaction>::new(io);
             let mut dispatcher = Dispatcher::new(Client::new(rx), conn);
 
             // First poll is needed to allow tx to send...
             assert!(dispatcher.poll().expect("nothing is ready").is_not_ready());
 
-            let body = ::Body::wrap_stream(::futures::stream::once(Ok::<_, ::Error>("")));
+            let body = crate::Body::wrap_stream(::futures::stream::once(Ok::<_, crate::Error>("")));
 
-            let _res_rx = tx.try_send(::Request::new(body)).unwrap();
+            let _res_rx = tx.try_send(crate::Request::new(body)).unwrap();
 
             dispatcher.poll().expect("empty body shouldn't panic");
             Ok::<(), ()>(())
