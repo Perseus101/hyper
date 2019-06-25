@@ -16,20 +16,21 @@ use std::net::{
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::{Async, Future, Poll};
-use futures::future::{Executor, ExecuteError};
-use futures::sync::oneshot;
-use futures_cpupool::{Builder as CpuPoolBuilder};
-use tokio_threadpool;
+use tokio_sync::oneshot;
+//use futures::future::{Executor, ExecuteError};
+//use futures::sync::oneshot;
+//use futures_cpupool::{Builder as CpuPoolBuilder};
+//use tokio_threadpool;
 
+use crate::common::{Future, Pin, Poll, Unpin, task};
 use self::sealed::GaiTask;
 
 /// Resolve a hostname to a set of IP addresses.
-pub trait Resolve {
+pub trait Resolve: Unpin {
     /// The set of IP addresses to try to connect to.
     type Addrs: Iterator<Item=IpAddr>;
     /// A Future of the resolved set of addresses.
-    type Future: Future<Item=Self::Addrs, Error=io::Error>;
+    type Future: Future<Output=Result<Self::Addrs, io::Error>> + Unpin;
     /// Resolve a hostname.
     fn resolve(&self, name: Name) -> Self::Future;
 }
@@ -53,7 +54,7 @@ pub struct GaiAddrs {
 
 /// A future to resole a name returned by `GaiResolver`.
 pub struct GaiFuture {
-    rx: oneshot::SpawnHandle<IpAddrs, io::Error>,
+    //rx: oneshot::SpawnHandle<IpAddrs, io::Error>,
 }
 
 impl Name {
@@ -112,13 +113,17 @@ impl GaiResolver {
     ///
     /// Takes number of DNS worker threads.
     pub fn new(threads: usize) -> Self {
+        unimplemented!()
+        /*
         let pool = CpuPoolBuilder::new()
             .name_prefix("hyper-dns")
             .pool_size(threads)
             .create();
         GaiResolver::new_with_executor(pool)
+        */
     }
 
+    /*
     /// Construct a new `GaiResolver` with a shared thread pool executor.
     ///
     /// Takes an executor to run blocking `getaddrinfo` tasks on.
@@ -130,6 +135,7 @@ impl GaiResolver {
             executor: GaiExecutor(Arc::new(executor)),
         }
     }
+    */
 }
 
 impl Resolve for GaiResolver {
@@ -138,9 +144,9 @@ impl Resolve for GaiResolver {
 
     fn resolve(&self, name: Name) -> Self::Future {
         let blocking = GaiBlocking::new(name.host);
-        let rx = oneshot::spawn(blocking, &self.executor);
+        //let rx = oneshot::spawn(blocking, &self.executor);
         GaiFuture {
-            rx,
+            //rx,
         }
     }
 }
@@ -152,14 +158,16 @@ impl fmt::Debug for GaiResolver {
 }
 
 impl Future for GaiFuture {
-    type Item = GaiAddrs;
-    type Error = io::Error;
+    type Output = Result<GaiAddrs, io::Error>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        /*
         let addrs = try_ready!(self.rx.poll());
         Ok(Async::Ready(GaiAddrs {
             inner: addrs,
         }))
+        */
+        unimplemented!()
     }
 }
 
@@ -184,14 +192,16 @@ impl fmt::Debug for GaiAddrs {
 }
 
 #[derive(Clone)]
-struct GaiExecutor(Arc<dyn Executor<GaiTask> + Send + Sync>);
+struct GaiExecutor/*(Arc<dyn Executor<GaiTask> + Send + Sync>)*/;
 
+/*
 impl Executor<oneshot::Execute<GaiBlocking>> for GaiExecutor {
     fn execute(&self, future: oneshot::Execute<GaiBlocking>) -> Result<(), ExecuteError<oneshot::Execute<GaiBlocking>>> {
         self.0.execute(GaiTask { work: future })
             .map_err(|err| ExecuteError::new(err.kind(), err.into_future().work))
     }
 }
+*/
 
 pub(super) struct GaiBlocking {
     host: String,
@@ -203,6 +213,7 @@ impl GaiBlocking {
     }
 }
 
+/*
 impl Future for GaiBlocking {
     type Item = IpAddrs;
     type Error = io::Error;
@@ -213,6 +224,7 @@ impl Future for GaiBlocking {
             .map(|i| Async::Ready(IpAddrs { iter: i }))
     }
 }
+*/
 
 pub(super) struct IpAddrs {
     iter: vec::IntoIter<SocketAddr>,
@@ -276,7 +288,7 @@ pub(super) mod sealed {
     use super::*;
     // Blocking task to be executed on a thread pool.
     pub struct GaiTask {
-        pub(super) work: oneshot::Execute<GaiBlocking>
+        //pub(super) work: oneshot::Execute<GaiBlocking>
     }
 
     impl fmt::Debug for GaiTask {
@@ -285,6 +297,7 @@ pub(super) mod sealed {
         }
     }
 
+    /*
     impl Future for GaiTask {
         type Item = ();
         type Error = ();
@@ -293,6 +306,7 @@ pub(super) mod sealed {
             self.work.poll()
         }
     }
+    */
 }
 
 
@@ -329,16 +343,18 @@ impl Resolve for TokioThreadpoolGaiResolver {
 }
 
 impl Future for TokioThreadpoolGaiFuture {
-    type Item = GaiAddrs;
-    type Error = io::Error;
+    type Output = Result<GaiAddrs, io::Error>;
 
-    fn poll(&mut self) -> Poll<GaiAddrs, io::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!();
+        /*
         match tokio_threadpool::blocking(|| (self.name.as_str(), 0).to_socket_addrs()) {
             Ok(Async::Ready(Ok(iter))) => Ok(Async::Ready(GaiAddrs { inner: IpAddrs { iter } })),
             Ok(Async::Ready(Err(e))) => Err(e),
             Ok(Async::NotReady) => Ok(Async::NotReady),
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
         }
+        */
     }
 }
 

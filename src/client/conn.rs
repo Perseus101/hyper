@@ -13,13 +13,12 @@ use std::mem;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::{Async, Future, Poll};
-use futures::future::{self, Either, Executor};
+use futures_util::future::{self, Either, FutureExt as _};
 use h2;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use crate::body::Payload;
-use crate::common::Exec;
+use crate::common::{Exec, Future, Pin, Poll, task};
 use crate::upgrade::Upgraded;
 use crate::proto;
 use super::dispatch;
@@ -41,7 +40,7 @@ type ConnEither<T, B> = Either<
 /// This is a shortcut for `Builder::new().handshake(io)`.
 pub fn handshake<T>(io: T) -> Handshake<T, crate::Body>
 where
-    T: AsyncRead + AsyncWrite + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     Builder::new()
         .handshake(io)
@@ -88,7 +87,7 @@ pub struct Builder {
 pub struct Handshake<T, B> {
     builder: Builder,
     io: Option<T>,
-    _marker: PhantomData<B>,
+    _marker: PhantomData<fn(B)>,
 }
 
 /// A future returned by `SendRequest::send_request`.
@@ -98,7 +97,7 @@ pub struct Handshake<T, B> {
 pub struct ResponseFuture {
     // for now, a Box is used to hide away the internal `B`
     // that can be returned if canceled
-    inner: Box<dyn Future<Item=Response<Body>, Error=crate::Error> + Send>,
+    inner: Pin<Box<dyn Future<Output=crate::Result<Response<Body>>> + Send>>,
 }
 
 /// Deconstructed parts of a `Connection`.
@@ -123,14 +122,6 @@ pub struct Parts<T> {
 
 // ========== internal client api
 
-/// A `Future` for when `SendRequest::poll_ready()` is ready.
-// FIXME: allow() required due to `impl Trait` leaking types to this lint
-#[allow(missing_debug_implementations)]
-#[must_use = "futures do nothing unless polled"]
-pub(super) struct WhenReady<B> {
-    tx: Option<SendRequest<B>>,
-}
-
 // A `SendRequest` that can be cloned to send HTTP2 requests.
 // private for now, probably not a great idea of a type...
 #[must_use = "futures do nothing unless polled"]
@@ -145,14 +136,16 @@ impl<B> SendRequest<B>
     /// Polls to determine whether this sender can be used yet for a request.
     ///
     /// If the associated connection is closed, this returns an Error.
-    pub fn poll_ready(&mut self) -> Poll<(), crate::Error> {
-        self.dispatch.poll_ready()
+    pub fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+        self.dispatch.poll_ready(cx)
     }
 
-    pub(super) fn when_ready(self) -> WhenReady<B> {
-        WhenReady {
-            tx: Some(self),
-        }
+    pub(super) fn when_ready(self) -> impl Future<Output=crate::Result<Self>> {
+        let mut me = Some(self);
+        future::poll_fn(move |cx| {
+            ready!(me.as_mut().unwrap().poll_ready(cx))?;
+            Poll::Ready(Ok(me.take().unwrap()))
+        })
     }
 
     pub(super) fn is_ready(&self) -> bool {
@@ -224,10 +217,10 @@ where
     pub fn send_request(&mut self, req: Request<B>) -> ResponseFuture {
         let inner = match self.dispatch.send(req) {
             Ok(rx) => {
-                Either::A(rx.then(move |res| {
+                Either::Left(rx.then(move |res| {
                     match res {
-                        Ok(Ok(res)) => Ok(res),
-                        Ok(Err(err)) => Err(err),
+                        Ok(Ok(res)) => future::ok(res),
+                        Ok(Err(err)) => future::err(err),
                         // this is definite bug if it happens, but it shouldn't happen!
                         Err(_) => panic!("dispatch dropped without returning error"),
                     }
@@ -236,25 +229,25 @@ where
             Err(_req) => {
                 debug!("connection was not ready");
                 let err = crate::Error::new_canceled().with("connection was not ready");
-                Either::B(future::err(err))
+                Either::Right(future::err(err))
             }
         };
 
         ResponseFuture {
-            inner: Box::new(inner),
+            inner: Box::pin(inner),
         }
     }
 
-    pub(crate) fn send_request_retryable(&mut self, req: Request<B>) -> impl Future<Item = Response<Body>, Error = (crate::Error, Option<Request<B>>)>
+    pub(crate) fn send_request_retryable(&mut self, req: Request<B>) -> impl Future<Output = Result<Response<Body>, (crate::Error, Option<Request<B>>)>> + Unpin
     where
         B: Send,
     {
         match self.dispatch.try_send(req) {
             Ok(rx) => {
-                Either::A(rx.then(move |res| {
+                Either::Left(rx.then(move |res| {
                     match res {
-                        Ok(Ok(res)) => Ok(res),
-                        Ok(Err(err)) => Err(err),
+                        Ok(Ok(res)) => future::ok(res),
+                        Ok(Err(err)) => future::err(err),
                         // this is definite bug if it happens, but it shouldn't happen!
                         Err(_) => panic!("dispatch dropped without returning error"),
                     }
@@ -263,7 +256,7 @@ where
             Err(req) => {
                 debug!("connection was not ready");
                 let err = crate::Error::new_canceled().with("connection was not ready");
-                Either::B(future::err((err, Some(req))))
+                Either::Right(future::err((err, Some(req))))
             }
         }
     }
@@ -305,16 +298,16 @@ impl<B> Http2SendRequest<B>
 where
     B: Payload + 'static,
 {
-    pub(super) fn send_request_retryable(&mut self, req: Request<B>) -> impl Future<Item=Response<Body>, Error=(crate::Error, Option<Request<B>>)>
+    pub(super) fn send_request_retryable(&mut self, req: Request<B>) -> impl Future<Output=Result<Response<Body>, (crate::Error, Option<Request<B>>)>>
     where
         B: Send,
     {
         match self.dispatch.try_send(req) {
             Ok(rx) => {
-                Either::A(rx.then(move |res| {
+                Either::Left(rx.then(move |res| {
                     match res {
-                        Ok(Ok(res)) => Ok(res),
-                        Ok(Err(err)) => Err(err),
+                        Ok(Ok(res)) => future::ok(res),
+                        Ok(Err(err)) => future::err(err),
                         // this is definite bug if it happens, but it shouldn't happen!
                         Err(_) => panic!("dispatch dropped without returning error"),
                     }
@@ -323,7 +316,7 @@ where
             Err(req) => {
                 debug!("connection was not ready");
                 let err = crate::Error::new_canceled().with("connection was not ready");
-                Either::B(future::err((err, Some(req))))
+                Either::Right(future::err((err, Some(req))))
             }
         }
     }
@@ -348,7 +341,7 @@ impl<B> Clone for Http2SendRequest<B> {
 
 impl<T, B> Connection<T, B>
 where
-    T: AsyncRead + AsyncWrite + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     B: Payload + 'static,
 {
     /// Return the inner IO object, and additional information.
@@ -356,8 +349,8 @@ where
     /// Only works for HTTP/1 connections. HTTP/2 connections will panic.
     pub fn into_parts(self) -> Parts<T> {
         let (io, read_buf, _) = match self.inner.expect("already upgraded") {
-            Either::A(h1) => h1.into_inner(),
-            Either::B(_h2) => {
+            Either::Left(h1) => h1.into_inner(),
+            Either::Right(_h2) => {
                 panic!("http2 cannot into_inner");
             }
         };
@@ -380,51 +373,55 @@ where
     /// Use [`poll_fn`](https://docs.rs/futures/0.1.25/futures/future/fn.poll_fn.html)
     /// and [`try_ready!`](https://docs.rs/futures/0.1.25/futures/macro.try_ready.html)
     /// to work with this function; or use the `without_shutdown` wrapper.
-    pub fn poll_without_shutdown(&mut self) -> Poll<(), crate::Error> {
+    pub fn poll_without_shutdown(&mut self) -> Poll<crate::Result<()>> {
+        unimplemented!("poll_without_shutdown");
+        /*
         match self.inner.as_mut().expect("already upgraded") {
-            &mut Either::A(ref mut h1) => {
+            &mut Either::Left(ref mut h1) => {
                 h1.poll_without_shutdown()
             },
-            &mut Either::B(ref mut h2) => {
+            &mut Either::Right(ref mut h2) => {
                 h2.poll().map(|x| x.map(|_| ()))
             }
         }
+        */
     }
 
     /// Prevent shutdown of the underlying IO object at the end of service the request,
     /// instead run `into_parts`. This is a convenience wrapper over `poll_without_shutdown`.
-    pub fn without_shutdown(self) -> impl Future<Item=Parts<T>, Error=crate::Error> {
+    pub fn without_shutdown(self) -> impl Future<Output=crate::Result<Parts<T>>> {
         let mut conn = Some(self);
-        ::futures::future::poll_fn(move || -> crate::Result<_> {
+        future::poll_fn(move |cx| -> Poll<crate::Result<Parts<T>>> {
+            unimplemented!("without_shutdown");
+            /*
             try_ready!(conn.as_mut().unwrap().poll_without_shutdown());
             Ok(conn.take().unwrap().into_parts().into())
+            */
         })
     }
 }
 
 impl<T, B> Future for Connection<T, B>
 where
-    T: AsyncRead + AsyncWrite + Send + 'static,
-    B: Payload + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: Payload + Unpin + 'static,
 {
-    type Item = ();
-    type Error = crate::Error;
+    type Output = crate::Result<()>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match try_ready!(self.inner.poll()) {
-            Some(proto::Dispatched::Shutdown) |
-            None => {
-                Ok(Async::Ready(()))
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        match ready!(Pin::new(self.inner.as_mut().unwrap()).poll(cx))? {
+            proto::Dispatched::Shutdown => {
+                Poll::Ready(Ok(()))
             },
-            Some(proto::Dispatched::Upgrade(pending)) => {
+            proto::Dispatched::Upgrade(pending) => {
                 let h1 = match mem::replace(&mut self.inner, None) {
-                    Some(Either::A(h1)) => h1,
+                    Some(Either::Left(h1)) => h1,
                     _ => unreachable!("Upgrade expects h1"),
                 };
 
                 let (io, buf, _) = h1.into_inner();
                 pending.fulfill(Upgraded::new(Box::new(io), buf));
-                Ok(Async::Ready(()))
+                Poll::Ready(Ok(()))
             }
         }
     }
@@ -461,6 +458,7 @@ impl Builder {
         }
     }
 
+    /*
     /// Provide an executor to execute background HTTP2 tasks.
     pub fn executor<E>(&mut self, exec: E) -> &mut Builder
     where
@@ -469,6 +467,7 @@ impl Builder {
         self.exec = Exec::Executor(Arc::new(exec));
         self
     }
+    */
 
     pub(super) fn h1_writev(&mut self, enabled: bool) -> &mut Builder {
         self.h1_writev = enabled;
@@ -532,7 +531,7 @@ impl Builder {
     #[inline]
     pub fn handshake<T, B>(&self, io: T) -> Handshake<T, B>
     where
-        T: AsyncRead + AsyncWrite + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         B: Payload + 'static,
     {
         trace!("client handshake HTTP/{}", if self.http2 { 2 } else { 1 });
@@ -548,13 +547,12 @@ impl Builder {
 
 impl<T, B> Future for Handshake<T, B>
 where
-    T: AsyncRead + AsyncWrite + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     B: Payload + 'static,
 {
-    type Item = (SendRequest<B>, Connection<T, B>);
-    type Error = crate::Error;
+    type Output = crate::Result<(SendRequest<B>, Connection<T, B>)>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let io = self.io.take().expect("polled more than once");
         let (tx, rx) = dispatch::channel();
         let either = if !self.builder.http2 {
@@ -573,13 +571,13 @@ where
             }
             let cd = proto::h1::dispatch::Client::new(rx);
             let dispatch = proto::h1::Dispatcher::new(cd, conn);
-            Either::A(dispatch)
+            Either::Left(dispatch)
         } else {
             let h2 = proto::h2::Client::new(io, rx, &self.builder.h2_builder, self.builder.exec.clone());
-            Either::B(h2)
+            Either::Right(h2)
         };
 
-        Ok(Async::Ready((
+        Poll::Ready(Ok((
             SendRequest {
                 dispatch: tx,
             },
@@ -600,12 +598,11 @@ impl<T, B> fmt::Debug for Handshake<T, B> {
 // ===== impl ResponseFuture
 
 impl Future for ResponseFuture {
-    type Item = Response<Body>;
-    type Error = crate::Error;
+    type Output = crate::Result<Response<Body>>;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.inner.poll()
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner).poll(cx)
     }
 }
 
@@ -613,24 +610,6 @@ impl fmt::Debug for ResponseFuture {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("ResponseFuture")
             .finish()
-    }
-}
-
-// ===== impl WhenReady
-
-impl<B> Future for WhenReady<B> {
-    type Item = SendRequest<B>;
-    type Error = crate::Error;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        let mut tx = self.tx.take().expect("polled after complete");
-        match tx.poll_ready()? {
-            Async::Ready(()) => Ok(Async::Ready(tx)),
-            Async::NotReady => {
-                self.tx = Some(tx);
-                Ok(Async::NotReady)
-            }
-        }
     }
 }
 

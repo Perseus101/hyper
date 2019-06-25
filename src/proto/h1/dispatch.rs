@@ -1,13 +1,13 @@
 use std::error::Error as StdError;
 
 use bytes::{Buf, Bytes};
-use futures::{Async, Future, Poll, Stream};
 use http::{Request, Response, StatusCode};
+use pin_utils::{unsafe_pinned, unsafe_unpinned};
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use crate::body::{Body, Payload};
 use crate::body::internal::FullDataArg;
-use crate::common::Never;
+use crate::common::{Future, Never, Poll, Pin, Unpin, task};
 use crate::proto::{BodyLength, DecodedLength, Conn, Dispatched, MessageHead, RequestHead, RequestLine, ResponseHead};
 use super::Http1Transaction;
 use crate::service::Service;
@@ -25,9 +25,9 @@ pub(crate) trait Dispatch {
     type PollBody;
     type PollError;
     type RecvItem;
-    fn poll_msg(&mut self) -> Poll<Option<(Self::PollItem, Self::PollBody)>, Self::PollError>;
-    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()>;
-    fn poll_ready(&mut self) -> Poll<(), ()>;
+    fn poll_msg(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Self::PollError>>>;
+    fn recv_msg(self: Pin<&mut Self>, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()>;
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Result<(), ()>>;
     fn should_poll(&self) -> bool;
 }
 
@@ -47,10 +47,17 @@ impl<D, Bs, I, T> Dispatcher<D, Bs, I, T>
 where
     D: Dispatch<PollItem=MessageHead<T::Outgoing>, PollBody=Bs, RecvItem=MessageHead<T::Incoming>>,
     D::PollError: Into<Box<dyn StdError + Send + Sync>>,
-    I: AsyncRead + AsyncWrite,
+    I: AsyncRead + AsyncWrite + Unpin,
     T: Http1Transaction,
     Bs: Payload,
 {
+    unsafe_unpinned!(conn: Conn<I, Bs::Data, T>);
+    unsafe_unpinned!(body_tx: Option<crate::body::Sender>);
+    unsafe_unpinned!(is_closing: bool);
+
+    unsafe_pinned!(dispatch: D);
+    unsafe_pinned!(body_rx: Option<Bs>);
+
     pub fn new(dispatch: D, conn: Conn<I, Bs::Data, T>) -> Self {
         Dispatcher {
             conn: conn,
@@ -75,33 +82,35 @@ where
     ///
     /// This is useful for old-style HTTP upgrades, but ignores
     /// newer-style upgrade API.
-    pub fn poll_without_shutdown(&mut self) -> Poll<(), crate::Error> {
-        self.poll_catch(false)
-            .map(|x| {
-                x.map(|ds| if let Dispatched::Upgrade(pending) = ds {
-                    pending.manual();
-                })
-            })
+    pub fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+        unimplemented!("Dispatcher::poll_without_shutdown");
+        /*
+        self.poll_catch(cx, false).map_ok(|ds| {
+            if let Dispatched::Upgrade(pending) = ds {
+                pending.manual();
+            }
+        })
+        */
     }
 
-    fn poll_catch(&mut self, should_shutdown: bool) -> Poll<Dispatched, crate::Error> {
-        self.poll_inner(should_shutdown).or_else(|e| {
+    fn poll_catch(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>, should_shutdown: bool) -> Poll<crate::Result<Dispatched>> {
+        Poll::Ready(ready!(self.as_mut().poll_inner(cx, should_shutdown)).or_else(|e| {
             // An error means we're shutting down either way.
             // We just try to give the error to the user,
             // and close the connection with an Ok. If we
             // cannot give it to the user, then return the Err.
-            self.dispatch.recv_msg(Err(e))?;
-            Ok(Async::Ready(Dispatched::Shutdown))
-        })
+            self.dispatch().recv_msg(Err(e))?;
+            Ok(Dispatched::Shutdown)
+        }))
     }
 
-    fn poll_inner(&mut self, should_shutdown: bool) -> Poll<Dispatched, crate::Error> {
+    fn poll_inner(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>, should_shutdown: bool) -> Poll<crate::Result<Dispatched>> {
         T::update_date();
 
         loop {
-            self.poll_read()?;
-            self.poll_write()?;
-            self.poll_flush()?;
+            self.as_mut().poll_read(cx)?;
+            self.as_mut().poll_write(cx)?;
+            self.as_mut().poll_flush(cx)?;
 
             // This could happen if reading paused before blocking on IO,
             // such as getting to the end of a framed message, but then
@@ -111,69 +120,69 @@ where
             //
             // Using this instead of task::current() and notify() inside
             // the Conn is noticeably faster in pipelined benchmarks.
-            if !self.conn.wants_read_again() {
+            if !self.as_mut().conn().wants_read_again() {
                 break;
             }
         }
 
         if self.is_done() {
-            if let Some(pending) = self.conn.pending_upgrade() {
-                self.conn.take_error()?;
-                return Ok(Async::Ready(Dispatched::Upgrade(pending)));
+            if let Some(pending) = self.as_mut().conn().pending_upgrade() {
+                self.as_mut().conn().take_error()?;
+                return Poll::Ready(Ok(Dispatched::Upgrade(pending)));
             } else if should_shutdown {
-                try_ready!(self.conn.shutdown().map_err(crate::Error::new_shutdown));
+                ready!(self.as_mut().conn().poll_shutdown(cx)).map_err(crate::Error::new_shutdown)?;
             }
-            self.conn.take_error()?;
-            Ok(Async::Ready(Dispatched::Shutdown))
+            self.conn().take_error()?;
+            Poll::Ready(Ok(Dispatched::Shutdown))
         } else {
-            Ok(Async::NotReady)
+            Poll::Pending
         }
     }
 
-    fn poll_read(&mut self) -> Poll<(), crate::Error> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
         loop {
             if self.is_closing {
-                return Ok(Async::Ready(()));
-            } else if self.conn.can_read_head() {
-                try_ready!(self.poll_read_head());
-            } else if let Some(mut body) = self.body_tx.take() {
+                return Poll::Ready(Ok(()));
+            } else if self.as_mut().conn().can_read_head() {
+                ready!(self.as_mut().poll_read_head(cx))?;
+            } else if let Some(mut body) = self.as_mut().body_tx().take() {
                 if self.conn.can_read_body() {
-                    match body.poll_ready() {
-                        Ok(Async::Ready(())) => (),
-                        Ok(Async::NotReady) => {
-                            self.body_tx = Some(body);
-                            return Ok(Async::NotReady);
+                    match body.poll_ready(cx) {
+                        Poll::Ready(Ok(())) => (),
+                        Poll::Pending => {
+                            *self.body_tx() = Some(body);
+                            return Poll::Pending;
                         },
-                        Err(_canceled) => {
+                        Poll::Ready(Err(_canceled)) => {
                             // user doesn't care about the body
                             // so we should stop reading
                             trace!("body receiver dropped before eof, closing");
-                            self.conn.close_read();
-                            return Ok(Async::Ready(()));
+                            self.conn().close_read();
+                            return Poll::Ready(Ok(()));
                         }
                     }
-                    match self.conn.read_body() {
-                        Ok(Async::Ready(Some(chunk))) => {
+                    match self.as_mut().conn().poll_read_body(cx) {
+                        Poll::Ready(Some(Ok(chunk))) => {
                             match body.send_data(chunk) {
                                 Ok(()) => {
-                                    self.body_tx = Some(body);
+                                    *self.as_mut().body_tx() = Some(body);
                                 },
                                 Err(_canceled) => {
                                     if self.conn.can_read_body() {
                                         trace!("body receiver dropped before eof, closing");
-                                        self.conn.close_read();
+                                        self.as_mut().conn().close_read();
                                     }
                                 }
                             }
                         },
-                        Ok(Async::Ready(None)) => {
+                        Poll::Ready(None) => {
                             // just drop, the body will close automatically
                         },
-                        Ok(Async::NotReady) => {
-                            self.body_tx = Some(body);
-                            return Ok(Async::NotReady);
+                        Poll::Pending => {
+                            *self.body_tx() = Some(body);
+                            return Poll::Pending;
                         }
-                        Err(e) => {
+                        Poll::Ready(Some(Err(e))) => {
                             body.send_error(crate::Error::new_body(e));
                         }
                     }
@@ -181,138 +190,149 @@ where
                     // just drop, the body will close automatically
                 }
             } else {
-                return self.conn.read_keep_alive();
+                return self.conn().poll_read_keep_alive(cx);
             }
         }
     }
 
-    fn poll_read_head(&mut self) -> Poll<(), crate::Error> {
+    fn poll_read_head(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
         // can dispatch receive, or does it still care about, an incoming message?
-        match self.dispatch.poll_ready() {
-            Ok(Async::Ready(())) => (),
-            Ok(Async::NotReady) => return Ok(Async::NotReady), // service might not be ready
+        match ready!(self.as_mut().dispatch().poll_ready(cx)) {
+            Ok(()) => (),
             Err(()) => {
                 trace!("dispatch no longer receiving messages");
                 self.close();
-                return Ok(Async::Ready(()));
+                return Poll::Ready(Ok(()));
             }
         }
         // dispatch is ready for a message, try to read one
-        match self.conn.read_head() {
-            Ok(Async::Ready(Some((head, body_len, wants_upgrade)))) => {
+        match ready!(self.as_mut().conn().poll_read_head(cx)) {
+            Some(Ok((head, body_len, wants_upgrade))) => {
                 let mut body = match body_len {
                     DecodedLength::ZERO => Body::empty(),
                     other => {
                         let (tx, rx) = Body::new_channel(other.into_opt());
-                        self.body_tx = Some(tx);
+                        *self.as_mut().body_tx() = Some(tx);
                         rx
                     },
                 };
                 if wants_upgrade {
-                    body.set_on_upgrade(self.conn.on_upgrade());
+                    body.set_on_upgrade(self.as_mut().conn().on_upgrade());
                 }
-                self.dispatch.recv_msg(Ok((head, body)))?;
-                Ok(Async::Ready(()))
-            }
-            Ok(Async::Ready(None)) => {
-                // read eof, conn will start to shutdown automatically
-                Ok(Async::Ready(()))
-            }
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(err) => {
+                self.dispatch().recv_msg(Ok((head, body)))?;
+                Poll::Ready(Ok(()))
+            },
+            Some(Err(err)) => {
                 debug!("read_head error: {}", err);
-                self.dispatch.recv_msg(Err(err))?;
+                self.dispatch().recv_msg(Err(err))?;
                 // if here, the dispatcher gave the user the error
                 // somewhere else. we still need to shutdown, but
                 // not as a second error.
-                Ok(Async::Ready(()))
+                Poll::Ready(Ok(()))
+            },
+            None => {
+                // read eof, conn will start to shutdown automatically
+                Poll::Ready(Ok(()))
             }
         }
     }
 
-    fn poll_write(&mut self) -> Poll<(), crate::Error> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
         loop {
             if self.is_closing {
-                return Ok(Async::Ready(()));
+                return Poll::Ready(Ok(()));
             } else if self.body_rx.is_none() && self.conn.can_write_head() && self.dispatch.should_poll() {
-                if let Some((head, mut body)) = try_ready!(self.dispatch.poll_msg().map_err(crate::Error::new_user_service)) {
+                if let Some(msg) = ready!(self.as_mut().dispatch().poll_msg(cx)) {
+                    let (head, mut body) = msg.map_err(crate::Error::new_user_service)?;
+
                     // Check if the body knows its full data immediately.
                     //
                     // If so, we can skip a bit of bookkeeping that streaming
                     // bodies need to do.
                     if let Some(full) = body.__hyper_full_data(FullDataArg(())).0 {
-                        self.conn.write_full_msg(head, full);
-                        return Ok(Async::Ready(()));
+                        self.as_mut().conn().write_full_msg(head, full);
+                        return Poll::Ready(Ok(()));
                     }
                     let body_type = if body.is_end_stream() {
-                        self.body_rx = None;
+                        self.as_mut().body_rx().set(None);
                         None
                     } else {
                         let btype = body.content_length()
                             .map(BodyLength::Known)
                             .or_else(|| Some(BodyLength::Unknown));
-                        self.body_rx = Some(body);
+                        self.as_mut().body_rx().set(Some(body));
                         btype
                     };
-                    self.conn.write_head(head, body_type);
+                    self.as_mut().conn().write_head(head, body_type);
                 } else {
                     self.close();
-                    return Ok(Async::Ready(()));
+                    return Poll::Ready(Ok(()));
                 }
             } else if !self.conn.can_buffer_body() {
-                try_ready!(self.poll_flush());
-            } else if let Some(mut body) = self.body_rx.take() {
-                if !self.conn.can_write_body() {
-                    trace!(
-                        "no more write body allowed, user body is_end_stream = {}",
-                        body.is_end_stream(),
-                    );
-                    continue;
-                }
-                match body.poll_data().map_err(crate::Error::new_user_body)? {
-                    Async::Ready(Some(chunk)) => {
+                ready!(self.as_mut().poll_flush(cx))?;
+            } else {
+                // A new scope is needed :(
+                // Manually unrolling the `unsafe_pinned` macro
+                let (conn, body_rx) = unsafe {
+                    let me = self.as_mut().get_unchecked_mut();
+                    (&mut me.conn, Pin::new_unchecked(&mut me.body_rx))
+                };
+                if let (Some(mut body), clear_body) = OptGuard::new(body_rx).guard_mut() {
+                    debug_assert!(!*clear_body, "opt guard defaults to keeping body");
+                    if !conn.can_write_body() {
+                        trace!(
+                            "no more write body allowed, user body is_end_stream = {}",
+                            body.is_end_stream(),
+                        );
+                        *clear_body = true;
+                        continue;
+                    }
+
+                    let item = ready!(body.as_mut().poll_data(cx));
+                    if let Some(item) = item {
+                        let chunk = item.map_err(|e| {
+                            *clear_body = true;
+                            crate::Error::new_user_body(e)
+                        })?;
                         let eos = body.is_end_stream();
                         if eos {
+                            *clear_body = true;
                             if chunk.remaining() == 0 {
                                 trace!("discarding empty chunk");
-                                self.conn.end_body();
+                                conn.end_body();
                             } else {
-                                self.conn.write_body_and_end(chunk);
+                                conn.write_body_and_end(chunk);
                             }
                         } else {
-                            self.body_rx = Some(body);
                             if chunk.remaining() == 0 {
                                 trace!("discarding empty chunk");
                                 continue;
                             }
-                            self.conn.write_body(chunk);
+                            conn.write_body(chunk);
                         }
-                    },
-                    Async::Ready(None) => {
-                        self.conn.end_body();
-                    },
-                    Async::NotReady => {
-                        self.body_rx = Some(body);
-                        return Ok(Async::NotReady);
+                    } else {
+                        *clear_body = true;
+                        conn.end_body();
                     }
+                } else {
+                    return Poll::Pending;
                 }
-            } else {
-                return Ok(Async::NotReady);
             }
         }
     }
 
-    fn poll_flush(&mut self) -> Poll<(), crate::Error> {
-        self.conn.flush().map_err(|err| {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+        self.conn().poll_flush(cx).map_err(|err| {
             debug!("error writing: {}", err);
             crate::Error::new_body_write(err)
         })
     }
 
-    fn close(&mut self) {
-        self.is_closing = true;
-        self.conn.close_read();
-        self.conn.close_write();
+    fn close(mut self: Pin<&mut Self>) {
+        *self.as_mut().is_closing() = true;
+        let conn = self.conn();
+        conn.close_read();
+        conn.close_write();
     }
 
     fn is_done(&self) -> bool {
@@ -337,28 +357,58 @@ impl<D, Bs, I, T> Future for Dispatcher<D, Bs, I, T>
 where
     D: Dispatch<PollItem=MessageHead<T::Outgoing>, PollBody=Bs, RecvItem=MessageHead<T::Incoming>>,
     D::PollError: Into<Box<dyn StdError + Send + Sync>>,
-    I: AsyncRead + AsyncWrite,
+    I: AsyncRead + AsyncWrite + Unpin,
     T: Http1Transaction,
     Bs: Payload,
 {
-    type Item = Dispatched;
-    type Error = crate::Error;
+    type Output = crate::Result<Dispatched>;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        self.poll_catch(true)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        self.poll_catch(cx, true)
+    }
+}
+
+// ===== impl OptGuard =====
+
+/// A drop guard to allow a mutable borrow of an Option while being able to
+/// set whether the `Option` should be cleared on drop.
+struct OptGuard<'a, T>(Pin<&'a mut Option<T>>, bool);
+
+impl<'a, T> OptGuard<'a, T> {
+    fn new(pin: Pin<&'a mut Option<T>>) -> Self {
+        OptGuard(pin, false)
+    }
+
+    fn guard_mut(&mut self) -> (Option<Pin<&mut T>>, &mut bool) {
+        (self.0.as_mut().as_pin_mut(), &mut self.1)
+    }
+}
+
+impl<'a, T> Drop for OptGuard<'a, T> {
+    fn drop(&mut self) {
+        if self.1 {
+            self.0.set(None);
+        }
     }
 }
 
 // ===== impl Server =====
 
-impl<S> Server<S> where S: Service {
+impl<S> Server<S>
+where
+    S: Service,
+{
+    unsafe_unpinned!(service: S);
+    unsafe_pinned!(in_flight: Option<S::Future>);
+
     pub fn new(service: S) -> Server<S> {
         Server {
             in_flight: None,
             service: service,
         }
     }
+
     pub fn into_service(self) -> S {
         self.service
     }
@@ -375,43 +425,42 @@ where
     type PollError = S::Error;
     type RecvItem = RequestHead;
 
-    fn poll_msg(&mut self) -> Poll<Option<(Self::PollItem, Self::PollBody)>, Self::PollError> {
-        if let Some(mut fut) = self.in_flight.take() {
-            let resp = match fut.poll()? {
-                Async::Ready(res) => res,
-                Async::NotReady => {
-                    self.in_flight = Some(fut);
-                    return Ok(Async::NotReady);
-                }
-            };
+    fn poll_msg(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Self::PollError>>> {
+        let ret = if let Some(mut fut) = self.as_mut().in_flight().as_pin_mut() {
+            let resp = ready!(fut.poll(cx)?);
             let (parts, body) = resp.into_parts();
             let head = MessageHead {
                 version: parts.version,
                 subject: parts.status,
                 headers: parts.headers,
             };
-            Ok(Async::Ready(Some((head, body))))
+            Poll::Ready(Some(Ok((head, body))))
         } else {
             unreachable!("poll_msg shouldn't be called if no inflight");
-        }
+        };
+
+        // Since in_flight finished, remove it
+        self.in_flight().set(None);
+        ret
     }
 
-    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
+    fn recv_msg(mut self: Pin<&mut Self>, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
         let (msg, body) = msg?;
         let mut req = Request::new(body);
         *req.method_mut() = msg.subject.0;
         *req.uri_mut() = msg.subject.1;
         *req.headers_mut() = msg.headers;
         *req.version_mut() = msg.version;
-        self.in_flight = Some(self.service.call(req));
+        let fut = self.as_mut().service().call(req);
+        self.in_flight().set(Some(fut));
         Ok(())
     }
 
-    fn poll_ready(&mut self) -> Poll<(), ()> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Result<(), ()>> {
         if self.in_flight.is_some() {
-            Ok(Async::NotReady)
+            Poll::Pending
         } else {
-            self.service.poll_ready()
+            self.service().poll_ready(cx)
                 .map_err(|_e| {
                     // FIXME: return error value.
                     trace!("service closed");
@@ -445,7 +494,9 @@ where
     type PollError = Never;
     type RecvItem = ResponseHead;
 
-    fn poll_msg(&mut self) -> Poll<Option<(Self::PollItem, Self::PollBody)>, Never> {
+    fn poll_msg(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Never>>> {
+        unimplemented!("impl Dispatch for Client -- poll_msg");
+        /*
         match self.rx.poll() {
             Ok(Async::Ready(Some((req, mut cb)))) => {
                 // check that future hasn't been canceled already
@@ -474,9 +525,10 @@ where
             Ok(Async::NotReady) => Ok(Async::NotReady),
             Err(never) => match never {},
         }
+        */
     }
 
-    fn recv_msg(&mut self, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
+    fn recv_msg(mut self: Pin<&mut Self>, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
         match msg {
             Ok((msg, body)) => {
                 if let Some(cb) = self.callback.take() {
@@ -494,6 +546,8 @@ where
                 }
             },
             Err(err) => {
+                unimplemented!("impl Dispatch for Client -- recv_msg");
+                /*
                 if let Some(cb) = self.callback.take() {
                     let _ = cb.send(Err((err, None)));
                     Ok(())
@@ -506,11 +560,14 @@ where
                 } else {
                     Err(err)
                 }
+                */
             }
         }
     }
 
-    fn poll_ready(&mut self) -> Poll<(), ()> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Result<(), ()>> {
+        unimplemented!("impl Dispatch for Client -- poll_ready");
+        /*
         match self.callback {
             Some(ref mut cb) => match cb.poll_cancel() {
                 Ok(Async::Ready(())) => {
@@ -522,6 +579,7 @@ where
             },
             None => Err(()),
         }
+        */
     }
 
     fn should_poll(&self) -> bool {

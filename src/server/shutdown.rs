@@ -1,11 +1,12 @@
 use std::error::Error as StdError;
 
-use futures::{Async, Future, Stream, Poll};
+//use futures::{Async, Future, Stream, Poll};
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use crate::body::{Body, Payload};
 use crate::common::drain::{self, Draining, Signal, Watch, Watching};
 use crate::common::exec::{H2Exec, NewSvcExec};
+use crate::common::{Future, Pin, Poll, Unpin, task};
 use crate::service::{MakeServiceRef, Service};
 use super::conn::{SpawnAll, UpgradeableConnection, Watcher};
 
@@ -37,11 +38,12 @@ impl<I, S, F, E> Graceful<I, S, F, E> {
 }
 
 
-impl<I, S, B, F, E> Future for Graceful<I, S, F, E>
+impl<I, S, /*B,*/ F, E> Future for Graceful<I, S, F, E>
+/*
 where
     I: Stream,
     I::Error: Into<Box<dyn StdError + Send + Sync>>,
-    I::Item: AsyncRead + AsyncWrite + Send + 'static,
+    I::Item: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     S: MakeServiceRef<I::Item, ReqBody=Body, ResBody=B>,
     S::Service: 'static,
     S::Error: Into<Box<dyn StdError + Send + Sync>>,
@@ -49,11 +51,13 @@ where
     F: Future<Item=()>,
     E: H2Exec<<S::Service as Service>::Future, B>,
     E: NewSvcExec<I::Item, S::Future, S::Service, E, GracefulWatcher>,
+    */
 {
-    type Item = ();
-    type Error = crate::Error;
+    type Output = crate::Result<()>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for Graceful");
+        /*
         loop {
             let next = match self.state {
                 State::Running {
@@ -75,16 +79,21 @@ where
                             .expect("drain channel")
                             .1
                             .clone();
-                        return spawn_all.poll_watch(&GracefulWatcher(watch));
+                        unimplemented!()
+                        //return spawn_all.poll_watch(&GracefulWatcher(watch));
                     },
                 },
                 State::Draining(ref mut draining) => {
+                    unimplemented!()
+                    /*
                     return draining.poll()
                         .map_err(|()| unreachable!("drain mpsc rx never errors"));
+                        */
                 }
             };
             self.state = next;
         }
+        */
     }
 }
 
@@ -94,7 +103,7 @@ pub struct GracefulWatcher(Watch);
 
 impl<I, S, E> Watcher<I, S, E> for GracefulWatcher
 where
-    I: AsyncRead + AsyncWrite + Send + 'static,
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     S: Service<ReqBody=Body> + 'static,
     E: H2Exec<S::Future, S::ResBody>,
 {
@@ -112,7 +121,7 @@ fn on_drain<I, S, E>(conn: &mut UpgradeableConnection<I, S, E>)
 where
     S: Service<ReqBody=Body>,
     S::Error: Into<Box<dyn StdError + Send + Sync>>,
-    I: AsyncRead + AsyncWrite,
+    I: AsyncRead + AsyncWrite + Unpin,
     S::ResBody: Payload + 'static,
     E: H2Exec<S::Future, S::ResBody>,
 {

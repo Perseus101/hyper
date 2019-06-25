@@ -1,10 +1,8 @@
 use std::mem;
 
-use futures::{Async, Future, Poll, Stream};
-use futures::future::Shared;
-use futures::sync::{mpsc, oneshot};
+use tokio_sync::{mpsc, oneshot};
 
-use super::Never;
+use super::{Future, Never, Poll, Pin, task};
 
 pub fn channel() -> (Signal, Watch) {
     let (tx, rx) = oneshot::channel();
@@ -16,7 +14,7 @@ pub fn channel() -> (Signal, Watch) {
         },
         Watch {
             drained_tx,
-            rx: rx.shared(),
+            //rx: rx.shared(),
         },
     )
 }
@@ -33,7 +31,7 @@ pub struct Draining {
 #[derive(Clone)]
 pub struct Watch {
     drained_tx: mpsc::Sender<Never>,
-    rx: Shared<oneshot::Receiver<()>>,
+    //rx: Shared<oneshot::Receiver<()>>,
 }
 
 #[allow(missing_debug_implementations)]
@@ -58,14 +56,16 @@ impl Signal {
 }
 
 impl Future for Draining {
-    type Item = ();
-    type Error = ();
+    type Output = ();
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for Draining");
+        /*
         match try_ready!(self.drained_rx.poll()) {
             Some(never) => match never {},
             None => Ok(Async::Ready(())),
         }
+        */
     }
 }
 
@@ -88,10 +88,11 @@ where
     F: Future,
     FN: FnOnce(&mut F),
 {
-    type Item = F::Item;
-    type Error = F::Error;
+    type Output = F::Output;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for Watching");
+        /*
         loop {
             match mem::replace(&mut self.state, State::Draining) {
                 State::Watch(on_drain) => {
@@ -111,6 +112,7 @@ where
                 },
             }
         }
+        */
     }
 }
 

@@ -4,12 +4,11 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use futures::{Future, Async, Poll};
-use futures::sync::oneshot;
+use futures_channel::oneshot;
 #[cfg(feature = "runtime")]
 use tokio_timer::Interval;
 
-use crate::common::Exec;
+use crate::common::{Exec, Future, Pin, Poll, task};
 use super::Ver;
 
 // FIXME: allow() required due to `impl Trait` leaking types to this lint
@@ -569,26 +568,29 @@ pub(super) struct Checkout<T> {
 }
 
 impl<T: Poolable> Checkout<T> {
-    fn poll_waiter(&mut self) -> Poll<Option<Pooled<T>>, crate::Error> {
+    fn poll_waiter(&mut self) -> Poll<Option<crate::Result<Pooled<T>>>> {
+        unimplemented!("Checkout::poll_waiter");
+        /*
         static CANCELED: &str = "pool checkout failed";
         if let Some(mut rx) = self.waiter.take() {
             match rx.poll() {
-                Ok(Async::Ready(value)) => {
+                Poll::Ready(Ok(value)) => {
                     if value.is_open() {
-                        Ok(Async::Ready(Some(self.pool.reuse(&self.key, value))))
+                        Poll::Ready(Ok(Some(self.pool.reuse(&self.key, value))))
                     } else {
                         Err(crate::Error::new_canceled().with(CANCELED))
                     }
                 },
-                Ok(Async::NotReady) => {
+                Poll::Pending => {
                     self.waiter = Some(rx);
-                    Ok(Async::NotReady)
+                    Poll::Pending
                 },
                 Err(_canceled) => Err(crate::Error::new_canceled().with(CANCELED)),
             }
         } else {
-            Ok(Async::Ready(None))
+            Poll::Ready(Ok(None))
         }
+        */
     }
 
     fn checkout(&mut self) -> Option<Pooled<T>> {
@@ -623,7 +625,10 @@ impl<T: Poolable> Checkout<T> {
 
             if entry.is_none() && self.waiter.is_none() {
                 let (tx, mut rx) = oneshot::channel();
-                let _ = rx.poll(); // park this task
+                //let _ = rx.poll(); // park this task
+                (|| -> () {
+                    unimplemented!()
+                })();
 
                 trace!("checkout waiting for idle connection: {:?}", self.key);
                 inner
@@ -643,21 +648,23 @@ impl<T: Poolable> Checkout<T> {
 }
 
 impl<T: Poolable> Future for Checkout<T> {
-    type Item = Pooled<T>;
-    type Error = crate::Error;
+    type Output = crate::Result<Pooled<T>>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for Checkout");
+        /*
         if let Some(pooled) = try_ready!(self.poll_waiter()) {
-            return Ok(Async::Ready(pooled));
+            return Poll::Ready(Ok(pooled));
         }
 
         if let Some(pooled) = self.checkout() {
-            Ok(Async::Ready(pooled))
+            Poll::Ready(Ok(pooled))
         } else if !self.pool.is_enabled() {
             Err(crate::Error::new_canceled().with("pool is disabled"))
         } else {
-            Ok(Async::NotReady)
+            Poll::Pending
         }
+        */
     }
 }
 
@@ -728,20 +735,21 @@ struct IdleInterval<T> {
 
 #[cfg(feature = "runtime")]
 impl<T: Poolable + 'static> Future for IdleInterval<T> {
-    type Item = ();
-    type Error = ();
+    type Output = ();
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for IdleInterval");
+        /*
         // Interval is a Stream
-        use futures::Stream;
+        use futures_core::Stream;
 
         loop {
             match self.pool_drop_notifier.poll() {
-                Ok(Async::Ready(n)) => match n {},
-                Ok(Async::NotReady) => (),
+                Poll::Ready(Ok(n)) => match n {},
+                Poll::Pending => (),
                 Err(_canceled) => {
                     trace!("pool closed, canceling idle interval");
-                    return Ok(Async::Ready(()));
+                    return Poll::Ready(Ok(()));
                 }
             }
 
@@ -756,8 +764,9 @@ impl<T: Poolable + 'static> Future for IdleInterval<T> {
                     continue;
                 }
             }
-            return Ok(Async::Ready(()));
+            return Poll::Ready(Ok(()));
         }
+        */
     }
 }
 

@@ -6,16 +6,17 @@ use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use futures::{Async, Future, Poll};
-use futures::future::{Executor};
 use http::uri::Scheme;
 use net2::TcpBuilder;
 use tokio_reactor::Handle;
-use tokio_tcp::{TcpStream, ConnectFuture};
+use tokio_tcp::{TcpStream/*, ConnectFuture*/};
 use tokio_timer::Delay;
 
+use crate::common::{Future, Pin, Poll, task};
 use super::{Connect, Connected, Destination};
 use super::dns::{self, GaiResolver, Resolve, TokioThreadpoolGaiResolver};
+
+type ConnectFuture = ();
 
 /// A connector for the `http` scheme.
 ///
@@ -87,6 +88,7 @@ impl HttpConnector {
         http
     }
 
+    /*
     /// Construct a new HttpConnector.
     ///
     /// Takes an executor to run blocking `getaddrinfo` tasks on.
@@ -98,6 +100,7 @@ impl HttpConnector {
         http.set_reactor(handle);
         http
     }
+    */
 }
 
 impl HttpConnector<TokioThreadpoolGaiResolver> {
@@ -314,10 +317,11 @@ enum State<R: Resolve> {
 }
 
 impl<R: Resolve> Future for HttpConnecting<R> {
-    type Item = (TcpStream, Connected);
-    type Error = io::Error;
+    type Output = Result<(TcpStream, Connected), io::Error>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for HttpConnecting");
+        /*
         loop {
             let state;
             match self.state {
@@ -367,6 +371,7 @@ impl<R: Resolve> Future for HttpConnecting<R> {
             }
             self.state = state;
         }
+        */
     }
 }
 
@@ -441,6 +446,7 @@ impl ConnectingTcpRemote {
 }
 
 impl ConnectingTcpRemote {
+    /*
     // not a Future, since passing a &Handle to poll
     fn poll(
         &mut self,
@@ -476,6 +482,7 @@ impl ConnectingTcpRemote {
             return Err(err.take().expect("missing connect error"));
         }
     }
+    */
 }
 
 fn connect(addr: &SocketAddr, local_addr: &Option<IpAddr>, handle: &Option<Handle>, reuse_address: bool) -> io::Result<ConnectFuture> {
@@ -510,10 +517,12 @@ fn connect(addr: &SocketAddr, local_addr: &Option<IpAddr>, handle: &Option<Handl
         None => Cow::Owned(Handle::default()),
     };
 
-    Ok(TcpStream::connect_std(builder.to_tcp_stream()?, addr, &handle))
+    unimplemented!("TcpStream::connect_std");
+    //Ok(TcpStream::connect_std(builder.to_tcp_stream()?, addr, &handle))
 }
 
 impl ConnectingTcp {
+    /*
     // not a Future, since passing a &Handle to poll
     fn poll(&mut self, handle: &Option<Handle>) -> Poll<TcpStream, io::Error> {
         match self.fallback.take() {
@@ -559,6 +568,7 @@ impl ConnectingTcp {
             }
         }
     }
+    */
 }
 
 #[cfg(test)]

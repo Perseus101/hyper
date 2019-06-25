@@ -3,13 +3,14 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use bytes::Bytes;
-use futures::sync::{mpsc, oneshot};
-use futures::{Async, Future, Poll, Stream, Sink, AsyncSink, StartSend};
+use futures_core::Stream;
+use futures_channel::{mpsc, oneshot};
+//use futures::{Async, Future, Poll, Stream, Sink, AsyncSink, StartSend};
 use tokio_buf::SizeHint;
 use h2;
 use http::HeaderMap;
 
-use crate::common::Never;
+use crate::common::{Never, Pin, Poll, task};
 use super::internal::{FullDataArg, FullDataRet};
 use super::{Chunk, Payload};
 use crate::upgrade::OnUpgrade;
@@ -40,7 +41,7 @@ enum Kind {
         content_length: Option<u64>,
         recv: h2::RecvStream,
     },
-    Wrapped(Box<dyn Stream<Item = Chunk, Error = Box<dyn StdError + Send + Sync>> + Send>),
+    Wrapped(Box<dyn Stream<Item = Result<Chunk, Box<dyn StdError + Send + Sync>>> + Send>),
 }
 
 struct Extra {
@@ -119,6 +120,7 @@ impl Body {
         (tx, rx)
     }
 
+    /*
     /// Wrap a futures `Stream` in a box inside `Body`.
     ///
     /// # Example
@@ -148,6 +150,7 @@ impl Body {
         let mapped = stream.map(Chunk::from).map_err(Into::into);
         Body::new(Kind::Wrapped(Box::new(mapped)))
     }
+    */
 
     /// Converts this `Body` into a `Future` of a pending HTTP upgrade.
     ///
@@ -200,6 +203,7 @@ impl Body {
             }))
     }
 
+    /*
     fn poll_eof(&mut self) -> Poll<Option<Chunk>, crate::Error> {
         match self.take_delayed_eof() {
             Some(DelayEof::NotEof(mut delay)) => {
@@ -279,6 +283,7 @@ impl Body {
             Kind::Wrapped(ref mut s) => s.poll().map_err(crate::Error::new_body),
         }
     }
+    */
 }
 
 impl Default for Body {
@@ -293,17 +298,21 @@ impl Payload for Body {
     type Data = Chunk;
     type Error = crate::Error;
 
-    fn poll_data(&mut self) -> Poll<Option<Self::Data>, Self::Error> {
-        self.poll_eof()
+    fn poll_data(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        unimplemented!("Body::poll_data");
+        //self.poll_eof()
     }
 
-    fn poll_trailers(&mut self) -> Poll<Option<HeaderMap>, Self::Error> {
+    fn poll_trailers(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<HeaderMap, Self::Error>>> {
+        unimplemented!("Body::poll_trailers");
+        /*
         match self.kind {
             Kind::H2 {
                 recv: ref mut h2, ..
             } => h2.poll_trailers().map_err(crate::Error::new_h2),
             _ => Ok(Async::Ready(None)),
         }
+        */
     }
 
     fn is_end_stream(&self) -> bool {
@@ -334,6 +343,27 @@ impl Payload for Body {
     }
 }
 
+impl fmt::Debug for Body {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        #[derive(Debug)]
+        struct Streaming;
+        #[derive(Debug)]
+        struct Empty;
+        #[derive(Debug)]
+        struct Once<'a>(&'a Chunk);
+
+        let mut builder = f.debug_tuple("Body");
+        match self.kind {
+            Kind::Once(None) => builder.field(&Empty),
+            Kind::Once(Some(ref chunk)) => builder.field(&Once(chunk)),
+            _ => builder.field(&Streaming),
+        };
+
+        builder.finish()
+    }
+}
+
+/*
 impl ::http_body::Body for Body {
     type Data = Chunk;
     type Error = crate::Error;
@@ -373,89 +403,6 @@ impl Stream for Body {
     }
 }
 
-impl fmt::Debug for Body {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        #[derive(Debug)]
-        struct Streaming;
-        #[derive(Debug)]
-        struct Empty;
-        #[derive(Debug)]
-        struct Once<'a>(&'a Chunk);
-
-        let mut builder = f.debug_tuple("Body");
-        match self.kind {
-            Kind::Once(None) => builder.field(&Empty),
-            Kind::Once(Some(ref chunk)) => builder.field(&Once(chunk)),
-            _ => builder.field(&Streaming),
-        };
-
-        builder.finish()
-    }
-}
-
-impl Sender {
-    /// Check to see if this `Sender` can send more data.
-    pub fn poll_ready(&mut self) -> Poll<(), crate::Error> {
-        match self.abort_tx.poll_cancel() {
-            Ok(Async::Ready(())) | Err(_) => return Err(crate::Error::new_closed()),
-            Ok(Async::NotReady) => (),
-        }
-
-        self.tx.poll_ready().map_err(|_| crate::Error::new_closed())
-    }
-
-    /// Sends data on this channel.
-    ///
-    /// This should be called after `poll_ready` indicated the channel
-    /// could accept another `Chunk`.
-    ///
-    /// Returns `Err(Chunk)` if the channel could not (currently) accept
-    /// another `Chunk`.
-    pub fn send_data(&mut self, chunk: Chunk) -> Result<(), Chunk> {
-        self.tx
-            .try_send(Ok(chunk))
-            .map_err(|err| err.into_inner().expect("just sent Ok"))
-    }
-
-    /// Aborts the body in an abnormal fashion.
-    pub fn abort(self) {
-        let _ = self.abort_tx.send(());
-    }
-
-    pub(crate) fn send_error(&mut self, err: crate::Error) {
-        let _ = self.tx.try_send(Err(err));
-    }
-}
-
-impl Sink for Sender {
-    type SinkItem = Chunk;
-    type SinkError = crate::Error;
-
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        Ok(Async::Ready(()))
-    }
-
-    fn start_send(&mut self, msg: Chunk) -> StartSend<Self::SinkItem, Self::SinkError> {
-        match self.poll_ready()? {
-            Async::Ready(_) => {
-                self.send_data(msg).map_err(|_| crate::Error::new_closed())?;
-                Ok(AsyncSink::Ready)
-            }
-            Async::NotReady => Ok(AsyncSink::NotReady(msg)),
-        }
-    }
-}
-
-impl From<Chunk> for Body {
-    #[inline]
-    fn from(chunk: Chunk) -> Body {
-        if chunk.is_empty() {
-            Body::empty()
-        } else {
-            Body::new(Kind::Once(Some(chunk)))
-        }
-    }
-}
 
 impl
     From<Box<dyn Stream<Item = Chunk, Error = Box<dyn StdError + Send + Sync>> + Send + 'static>>
@@ -468,6 +415,18 @@ impl
         >,
     ) -> Body {
         Body::new(Kind::Wrapped(stream))
+    }
+}
+*/
+
+impl From<Chunk> for Body {
+    #[inline]
+    fn from(chunk: Chunk) -> Body {
+        if chunk.is_empty() {
+            Body::empty()
+        } else {
+            Body::new(Kind::Once(Some(chunk)))
+        }
     }
 }
 
@@ -525,6 +484,64 @@ impl From<Cow<'static, str>> for Body {
         }
     }
 }
+
+impl Sender {
+    /// Check to see if this `Sender` can send more data.
+    pub fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+        unimplemented!("Sender::poll_ready");
+        /*
+        match self.abort_tx.poll_cancel() {
+            Ok(Async::Ready(())) | Err(_) => return Err(crate::Error::new_closed()),
+            Ok(Async::NotReady) => (),
+        }
+
+        self.tx.poll_ready().map_err(|_| crate::Error::new_closed())
+        */
+    }
+
+    /// Sends data on this channel.
+    ///
+    /// This should be called after `poll_ready` indicated the channel
+    /// could accept another `Chunk`.
+    ///
+    /// Returns `Err(Chunk)` if the channel could not (currently) accept
+    /// another `Chunk`.
+    pub fn send_data(&mut self, chunk: Chunk) -> Result<(), Chunk> {
+        self.tx
+            .try_send(Ok(chunk))
+            .map_err(|err| err.into_inner().expect("just sent Ok"))
+    }
+
+    /// Aborts the body in an abnormal fashion.
+    pub fn abort(self) {
+        let _ = self.abort_tx.send(());
+    }
+
+    pub(crate) fn send_error(&mut self, err: crate::Error) {
+        let _ = self.tx.try_send(Err(err));
+    }
+}
+
+/*
+impl Sink for Sender {
+    type SinkItem = Chunk;
+    type SinkError = crate::Error;
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
+    }
+
+    fn start_send(&mut self, msg: Chunk) -> StartSend<Self::SinkItem, Self::SinkError> {
+        match self.poll_ready()? {
+            Async::Ready(_) => {
+                self.send_data(msg).map_err(|_| crate::Error::new_closed())?;
+                Ok(AsyncSink::Ready)
+            }
+            Async::NotReady => Ok(AsyncSink::NotReady(msg)),
+        }
+    }
+}
+*/
 
 #[test]
 fn test_body_stream_concat() {

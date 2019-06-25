@@ -9,3 +9,20 @@ pub(crate) use self::buf::StaticBuf;
 pub(crate) use self::exec::Exec;
 pub(crate) use self::lazy::{lazy, Started as Lazy};
 pub use self::never::Never;
+
+// group up types normally needed for `Future`
+pub(crate) use std::{
+    future::Future,
+    marker::Unpin,
+    pin::Pin,
+    task::{self, Poll},
+};
+
+macro_rules! ready {
+    ($e:expr) => (
+        match $e {
+            ::std::task::Poll::Ready(v) => v,
+            ::std::task::Poll::Pending => return ::std::task::Poll::Pending,
+        }
+    )
+}

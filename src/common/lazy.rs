@@ -1,6 +1,6 @@
 use std::mem;
 
-use futures::{Future, IntoFuture, Poll};
+use super::{Future, Pin, Poll, task};
 
 pub(crate) trait Started: Future {
     fn started(&self) -> bool;
@@ -9,7 +9,7 @@ pub(crate) trait Started: Future {
 pub(crate) fn lazy<F, R>(func: F) -> Lazy<F, R>
 where
     F: FnOnce() -> R,
-    R: IntoFuture,
+    //R: IntoFuture,
 {
     Lazy {
         inner: Inner::Init(func),
@@ -18,8 +18,8 @@ where
 
 // FIXME: allow() required due to `impl Trait` leaking types to this lint
 #[allow(missing_debug_implementations)]
-pub(crate) struct Lazy<F, R: IntoFuture> {
-    inner: Inner<F, R::Future>
+pub(crate) struct Lazy<F, R> {
+    inner: Inner<F, R>
 }
 
 enum Inner<F, R> {
@@ -31,7 +31,7 @@ enum Inner<F, R> {
 impl<F, R> Started for Lazy<F, R>
 where
     F: FnOnce() -> R,
-    R: IntoFuture,
+    R: Future,
 {
     fn started(&self) -> bool {
         match self.inner {
@@ -45,12 +45,13 @@ where
 impl<F, R> Future for Lazy<F, R>
 where
     F: FnOnce() -> R,
-    R: IntoFuture,
+    R: Future,
 {
-    type Item = R::Item;
-    type Error = R::Error;
+    type Output = R::Output;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        unimplemented!("impl Future for Lazy");
+        /*
         match self.inner {
             Inner::Fut(ref mut f) => return f.poll(),
             _ => (),
@@ -65,6 +66,7 @@ where
             },
             _ => unreachable!("lazy state wrong"),
         }
+        */
     }
 }
 

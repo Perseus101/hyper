@@ -20,8 +20,11 @@ include = [
 
 [dependencies]
 bytes = "0.4.4"
-futures = "0.1.21"
-futures-cpupool = { version = "0.1.6", optional = true }
+#futures = "0.1.21"
+#futures-cpupool = { version = "0.1.6", optional = true }
+futures-core-preview = { version = "0.3.0-alpha.16" }
+futures-channel-preview = { version = "0.3.0-alpha.16" }
+futures-util-preview = { version = "0.3.0-alpha.16" }
 http = "0.1.15"
 http-body = "0.1"
 httparse = "1.0"
@@ -30,16 +33,18 @@ iovec = "0.1"
 itoa = "0.4.1"
 log = "0.4"
 net2 = { version = "0.2.32", optional = true }
+pin-utils = "0.1.0-alpha.4"
 time = "0.1"
-tokio = { version = "0.1.14", optional = true, default-features = false, features = ["rt-full"] }
+tokio = { path = "../tokio/tokio", optional = true, default-features = false, features = ["rt-full"] }
 tokio-buf = "0.1"
-tokio-executor = { version = "0.1.0", optional = true }
-tokio-io = "0.1"
-tokio-reactor = { version = "0.1", optional = true }
-tokio-tcp = { version = "0.1", optional = true }
-tokio-threadpool = { version = "0.1.3", optional = true }
-tokio-timer = { version = "0.2", optional = true }
-want = "0.0.6"
+tokio-executor = { path = "../tokio/tokio-executor", optional = true }
+tokio-io = { path = "../tokio/tokio-io" }
+tokio-reactor = { path = "../tokio/tokio-reactor", optional = true }
+tokio-sync = { path = "../tokio/tokio-sync" }
+tokio-tcp = { path = "../tokio/tokio-tcp", optional = true }
+#tokio-threadpool = { version = "0.1.3", optional = true }
+tokio-timer = { path = "../tokio/tokio-timer", optional = true, features = ["interval"] }
+want = { path = "../want" }
 
 [build-dependencies]
 rustc_version = "0.2"
@@ -62,13 +67,13 @@ default = [
     "runtime",
 ]
 runtime = [
-    "futures-cpupool",
+    #"futures-cpupool",
     "net2",
     "tokio",
     "tokio-executor",
     "tokio-reactor",
     "tokio-tcp",
-    "tokio-threadpool",
+    #"tokio-threadpool",
     "tokio-timer",
 ]
 nightly = []
