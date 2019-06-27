@@ -36,7 +36,7 @@ pub use http::{
     Version,
 };
 
-//pub use crate::client::Client;
+pub use crate::client::Client;
 pub use crate::error::{Result, Error};
 pub use crate::body::{Body, Chunk};
 pub use crate::server::Server;

@@ -9,7 +9,7 @@ pub(crate) trait Started: Future {
 pub(crate) fn lazy<F, R>(func: F) -> Lazy<F, R>
 where
     F: FnOnce() -> R,
-    //R: IntoFuture,
+    R: Future + Unpin,
 {
     Lazy {
         inner: Inner::Init(func),
@@ -31,7 +31,7 @@ enum Inner<F, R> {
 impl<F, R> Started for Lazy<F, R>
 where
     F: FnOnce() -> R,
-    R: Future,
+    R: Future + Unpin,
 {
     fn started(&self) -> bool {
         match self.inner {
@@ -45,28 +45,28 @@ where
 impl<F, R> Future for Lazy<F, R>
 where
     F: FnOnce() -> R,
-    R: Future,
+    R: Future + Unpin,
 {
     type Output = R::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        unimplemented!("impl Future for Lazy");
-        /*
         match self.inner {
-            Inner::Fut(ref mut f) => return f.poll(),
+            Inner::Fut(ref mut f) => return Pin::new(f).poll(cx),
             _ => (),
         }
 
         match mem::replace(&mut self.inner, Inner::Empty) {
             Inner::Init(func) => {
-                let mut fut = func().into_future();
-                let ret = fut.poll();
+                let mut fut = func();
+                let ret = Pin::new(&mut fut).poll(cx);
                 self.inner = Inner::Fut(fut);
                 ret
             },
             _ => unreachable!("lazy state wrong"),
         }
-        */
     }
 }
+
+// The closure `F` is never pinned
+impl<F, R: Unpin> Unpin for Lazy<F, R> {}
 

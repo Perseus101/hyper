@@ -488,15 +488,12 @@ impl From<Cow<'static, str>> for Body {
 impl Sender {
     /// Check to see if this `Sender` can send more data.
     pub fn poll_ready(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
-        unimplemented!("Sender::poll_ready");
-        /*
-        match self.abort_tx.poll_cancel() {
-            Ok(Async::Ready(())) | Err(_) => return Err(crate::Error::new_closed()),
-            Ok(Async::NotReady) => (),
+        match self.abort_tx.poll_cancel(cx) {
+            Poll::Ready(()) => return Poll::Ready(Err(crate::Error::new_closed())),
+            Poll::Pending => (), // fallthrough
         }
 
-        self.tx.poll_ready().map_err(|_| crate::Error::new_closed())
-        */
+        self.tx.poll_ready(cx).map_err(|_| crate::Error::new_closed())
     }
 
     /// Sends data on this channel.

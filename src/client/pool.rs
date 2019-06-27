@@ -621,12 +621,7 @@ impl<T: Poolable> Checkout<T> {
             }
 
             if entry.is_none() && self.waiter.is_none() {
-                let (tx, mut rx) = oneshot::channel();
-                //let _ = rx.poll(); // park this task
-                (|| -> () {
-                    unimplemented!()
-                })();
-
+                let (tx, rx) = oneshot::channel();
                 trace!("checkout waiting for idle connection: {:?}", self.key);
                 inner
                     .waiters
@@ -657,7 +652,9 @@ impl<T: Poolable> Future for Checkout<T> {
         } else if !self.pool.is_enabled() {
             Poll::Ready(Err(crate::Error::new_canceled().with("pool is disabled")))
         } else {
-            Poll::Pending
+            // There's a new waiter, but there's no way it should be ready yet.
+            // We just need to register the waker.
+            self.poll_waiter(cx).map(|_| unreachable!())
         }
     }
 }

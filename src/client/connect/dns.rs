@@ -55,6 +55,7 @@ pub struct GaiAddrs {
 /// A future to resole a name returned by `GaiResolver`.
 pub struct GaiFuture {
     //rx: oneshot::SpawnHandle<IpAddrs, io::Error>,
+    blocking: GaiBlocking,
 }
 
 impl Name {
@@ -113,7 +114,9 @@ impl GaiResolver {
     ///
     /// Takes number of DNS worker threads.
     pub fn new(threads: usize) -> Self {
-        unimplemented!()
+        GaiResolver {
+            executor: GaiExecutor,
+        }
         /*
         let pool = CpuPoolBuilder::new()
             .name_prefix("hyper-dns")
@@ -147,6 +150,7 @@ impl Resolve for GaiResolver {
         //let rx = oneshot::spawn(blocking, &self.executor);
         GaiFuture {
             //rx,
+            blocking,
         }
     }
 }
@@ -167,7 +171,7 @@ impl Future for GaiFuture {
             inner: addrs,
         }))
         */
-        unimplemented!()
+        Poll::Ready(self.blocking.block().map(|addrs| GaiAddrs { inner: addrs }))
     }
 }
 
@@ -210,6 +214,13 @@ pub(super) struct GaiBlocking {
 impl GaiBlocking {
     pub(super) fn new(host: String) -> GaiBlocking {
         GaiBlocking { host }
+    }
+
+    fn block(&self) -> io::Result<IpAddrs> {
+        debug!("resolving host={:?}", self.host);
+        (&*self.host, 0).to_socket_addrs()
+            .map(|i| IpAddrs { iter: i })
+
     }
 }
 

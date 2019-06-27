@@ -495,17 +495,15 @@ where
     type RecvItem = ResponseHead;
 
     fn poll_msg(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Result<(Self::PollItem, Self::PollBody), Never>>> {
-        unimplemented!("impl Dispatch for Client -- poll_msg");
-        /*
-        match self.rx.poll() {
-            Ok(Async::Ready(Some((req, mut cb)))) => {
+        match self.rx.poll_next(cx) {
+            Poll::Ready(Some((req, mut cb))) => {
                 // check that future hasn't been canceled already
-                match cb.poll_cancel().expect("poll_cancel cannot error") {
-                    Async::Ready(()) => {
+                match cb.poll_cancel(cx) {
+                    Poll::Ready(()) => {
                         trace!("request canceled");
-                        Ok(Async::Ready(None))
+                        Poll::Ready(None)
                     },
-                    Async::NotReady => {
+                    Poll::Pending => {
                         let (parts, body) = req.into_parts();
                         let head = RequestHead {
                             version: parts.version,
@@ -513,19 +511,17 @@ where
                             headers: parts.headers,
                         };
                         self.callback = Some(cb);
-                        Ok(Async::Ready(Some((head, body))))
+                        Poll::Ready(Some(Ok((head, body))))
                     }
                 }
             },
-            Ok(Async::Ready(None)) => {
+            Poll::Ready(None) => {
                 trace!("client tx closed");
                 // user has dropped sender handle
-                Ok(Async::Ready(None))
+                Poll::Ready(None)
             },
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(never) => match never {},
+            Poll::Pending => Poll::Pending,
         }
-        */
     }
 
     fn recv_msg(mut self: Pin<&mut Self>, msg: crate::Result<(Self::RecvItem, Body)>) -> crate::Result<()> {
@@ -551,7 +547,7 @@ where
                 if let Some(cb) = self.callback.take() {
                     let _ = cb.send(Err((err, None)));
                     Ok(())
-                } else if let Ok(Async::Ready(Some((req, cb)))) = self.rx.poll() {
+                } else if let Poll::Ready(Ok(Some((req, cb)))) = self.rx.poll() {
                     trace!("canceling queued request with connection error: {}", err);
                     // in this case, the message was never even started, so it's safe to tell
                     // the user that the request was completely canceled
@@ -566,20 +562,16 @@ where
     }
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Result<(), ()>> {
-        unimplemented!("impl Dispatch for Client -- poll_ready");
-        /*
         match self.callback {
-            Some(ref mut cb) => match cb.poll_cancel() {
-                Ok(Async::Ready(())) => {
+            Some(ref mut cb) => match cb.poll_cancel(cx) {
+                Poll::Ready(()) => {
                     trace!("callback receiver has dropped");
-                    Err(())
+                    Poll::Ready(Err(()))
                 },
-                Ok(Async::NotReady) => Ok(Async::Ready(())),
-                Err(_) => unreachable!("oneshot poll_cancel cannot error"),
+                Poll::Pending => Poll::Ready(Ok(())),
             },
-            None => Err(()),
+            None => Poll::Ready(Err(())),
         }
-        */
     }
 
     fn should_poll(&self) -> bool {
