@@ -4,6 +4,7 @@ extern crate hyper;
 extern crate pretty_env_logger;
 
 use std::env;
+use std::io::{self, Write};
 
 use hyper::Client;
 use hyper::rt;
@@ -41,21 +42,28 @@ async fn fetch_url(url: hyper::Uri) {
     let res = match client.get(url).await {
         Ok(res) => res,
         Err(err) => {
-            eprintln!("Error: {}", err);
+            eprintln!("Response Error: {}", err);
             return;
         }
     };
 
     println!("Response: {}", res.status());
-    println!("Headers: {:#?}", res.headers());
+    println!("Headers: {:#?}\n", res.headers());
 
-    /*
-    // The body is a stream, and for_each returns a new Future
-    // when the stream is finished, and calls the closure on
-    // each chunk of the body...
-    res.into_body().for_each(|chunk| {
-        io::stdout().write_all(&chunk)
-            .map_err(|e| panic!("example expects stdout is open, error={}", e))
-    })
-    */
+    let mut body = res.into_body();
+
+    while let Some(next) = body.next().await {
+        match next {
+            Ok(chunk) => {
+                io::stdout().write_all(&chunk)
+                    .expect("example expects stdout is open");
+            },
+            Err(err) => {
+                eprintln!("Body Error: {}", err);
+                return;
+            }
+        }
+    }
+
+    println!("\n\nDone!");
 }

@@ -542,21 +542,21 @@ where
                 }
             },
             Err(err) => {
-                unimplemented!("impl Dispatch for Client -- recv_msg");
-                /*
                 if let Some(cb) = self.callback.take() {
                     let _ = cb.send(Err((err, None)));
                     Ok(())
-                } else if let Poll::Ready(Ok(Some((req, cb)))) = self.rx.poll() {
-                    trace!("canceling queued request with connection error: {}", err);
-                    // in this case, the message was never even started, so it's safe to tell
-                    // the user that the request was completely canceled
-                    let _ = cb.send(Err((crate::Error::new_canceled().with(err), Some(req))));
-                    Ok(())
                 } else {
-                    Err(err)
+                    self.rx.close();
+                    if let Some((req, cb)) = self.rx.try_recv() {
+                        trace!("canceling queued request with connection error: {}", err);
+                        // in this case, the message was never even started, so it's safe to tell
+                        // the user that the request was completely canceled
+                        let _ = cb.send(Err((crate::Error::new_canceled().with(err), Some(req))));
+                        Ok(())
+                    } else {
+                        Err(err)
+                    }
                 }
-                */
             }
         }
     }

@@ -4,6 +4,7 @@
 // XXX NOOOOOOOO
 //#![cfg_attr(test, deny(warnings))]
 #![allow(warnings)]
+#![feature(async_await)]
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 
 //! # hyper

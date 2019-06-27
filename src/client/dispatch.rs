@@ -152,6 +152,19 @@ impl<T, U> Receiver<T, U> {
             },
         }
     }
+
+    pub(crate) fn close(&mut self) {
+        self.taker.cancel();
+        self.inner.close();
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<(T, Callback<T, U>)> {
+        match self.inner.try_next() {
+            Ok(Some(mut env)) => env.0.take(),
+            Ok(None) => None,
+            Err(_) => None,
+        }
+    }
 }
 
 impl<T, U> Drop for Receiver<T, U> {
