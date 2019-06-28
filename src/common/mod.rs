@@ -1,3 +1,12 @@
+macro_rules! ready {
+    ($e:expr) => (
+        match $e {
+            ::std::task::Poll::Ready(v) => v,
+            ::std::task::Poll::Pending => return ::std::task::Poll::Pending,
+        }
+    )
+}
+
 mod buf;
 pub(crate) mod drain;
 pub(crate) mod exec;
@@ -18,11 +27,3 @@ pub(crate) use std::{
     task::{self, Poll},
 };
 
-macro_rules! ready {
-    ($e:expr) => (
-        match $e {
-            ::std::task::Poll::Ready(v) => v,
-            ::std::task::Poll::Pending => return ::std::task::Poll::Pending,
-        }
-    )
-}

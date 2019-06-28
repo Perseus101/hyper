@@ -489,8 +489,10 @@ where
     ///
     /// This `Connection` should continue to be polled until shutdown
     /// can finish.
-    pub fn graceful_shutdown(&mut self) {
-        match *self.conn.as_mut().unwrap() {
+    pub fn graceful_shutdown(self: Pin<&mut Self>) {
+        // Safety: neither h1 nor h2 poll any of the generic futures
+        // in these methods.
+        match unsafe { self.get_unchecked_mut() }.conn.as_mut().unwrap() {
             Either::A(ref mut h1) => {
                 h1.disable_keep_alive();
             },
@@ -975,8 +977,8 @@ mod upgrades {
         ///
         /// This `Connection` should continue to be polled until shutdown
         /// can finish.
-        pub fn graceful_shutdown(&mut self) {
-            self.inner.graceful_shutdown()
+        pub fn graceful_shutdown(self: Pin<&mut Self>) {
+            unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().inner) }.graceful_shutdown()
         }
     }
 
