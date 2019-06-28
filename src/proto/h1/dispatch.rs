@@ -82,7 +82,7 @@ where
     ///
     /// This is useful for old-style HTTP upgrades, but ignores
     /// newer-style upgrade API.
-    pub fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+    pub(crate) fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
         unimplemented!("Dispatcher::poll_without_shutdown");
         /*
         self.poll_catch(cx, false).map_ok(|ds| {

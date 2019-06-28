@@ -16,11 +16,9 @@ use std::net::{
 use std::str::FromStr;
 use std::sync::Arc;
 
+use tokio_executor::TypedExecutor;
 use tokio_sync::oneshot;
-//use futures::future::{Executor, ExecuteError};
-//use futures::sync::oneshot;
-//use futures_cpupool::{Builder as CpuPoolBuilder};
-//use tokio_threadpool;
+use tokio_threadpool;
 
 use crate::common::{Future, Pin, Poll, Unpin, task};
 use self::sealed::GaiTask;
@@ -118,10 +116,15 @@ impl GaiResolver {
             executor: GaiExecutor,
         }
         /*
-        let pool = CpuPoolBuilder::new()
-            .name_prefix("hyper-dns")
-            .pool_size(threads)
-            .create();
+        use tokio_threadpool::Builder;
+
+        let pool = Builder::new()
+            .name_prefix("hyper-dns-gai-resolver")
+            // not for CPU tasks, so only spawn workers
+            // in blocking mode
+            .pool_size(1)
+            .max_blocking(threads)
+            .build();
         GaiResolver::new_with_executor(pool)
         */
     }
@@ -130,9 +133,9 @@ impl GaiResolver {
     /// Construct a new `GaiResolver` with a shared thread pool executor.
     ///
     /// Takes an executor to run blocking `getaddrinfo` tasks on.
-    pub fn new_with_executor<E: 'static>(executor: E) -> Self
+    /*pub */fn new_with_executor<E: 'static>(executor: E) -> Self
     where
-        E: Executor<GaiTask> + Send + Sync,
+        E: TypedExecutor<GaiTask> + Send + Sync,
     {
         GaiResolver {
             executor: GaiExecutor(Arc::new(executor)),
@@ -357,15 +360,12 @@ impl Future for TokioThreadpoolGaiFuture {
     type Output = Result<GaiAddrs, io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        unimplemented!();
-        /*
-        match tokio_threadpool::blocking(|| (self.name.as_str(), 0).to_socket_addrs()) {
-            Ok(Async::Ready(Ok(iter))) => Ok(Async::Ready(GaiAddrs { inner: IpAddrs { iter } })),
-            Ok(Async::Ready(Err(e))) => Err(e),
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        match ready!(tokio_threadpool::blocking(|| (self.name.as_str(), 0).to_socket_addrs())) {
+            Ok(Ok(iter)) => Poll::Ready(Ok(GaiAddrs { inner: IpAddrs { iter } })),
+            Ok(Err(e)) => Poll::Ready(Err(e)),
+            // a BlockingError, meaning not on a tokio_threadpool :(
+            Err(e) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e))),
         }
-        */
     }
 }
 
