@@ -203,7 +203,3 @@ where
         */
     }
 }
-
-// B::Data is never pinned
-// TODO: this should be removed once the h2 crate has updated its PhantomData<B>
-impl<T: Unpin, B: Payload + Unpin> Unpin for Client<T, B> {}

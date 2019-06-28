@@ -542,7 +542,12 @@ where
     /// Use [`poll_fn`](https://docs.rs/futures/0.1.25/futures/future/fn.poll_fn.html)
     /// and [`try_ready!`](https://docs.rs/futures/0.1.25/futures/macro.try_ready.html)
     /// to work with this function; or use the `without_shutdown` wrapper.
-    pub fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
+    pub fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>>
+    where
+        S: Unpin,
+        S::Future: Unpin,
+        B: Unpin,
+    {
         loop {
             let polled = match *self.conn.as_mut().unwrap() {
                 Either::A(ref mut h1) => h1.poll_without_shutdown(cx),
@@ -563,17 +568,20 @@ where
         }
     }
 
-    /*
     /// Prevent shutdown of the underlying IO object at the end of service the request,
     /// instead run `into_parts`. This is a convenience wrapper over `poll_without_shutdown`.
-    pub fn without_shutdown(self) -> impl Future<Output=crate::Result<Parts<I,S>>> {
+    pub fn without_shutdown(self) -> impl Future<Output=crate::Result<Parts<I, S>>>
+    where
+        S: Unpin,
+        S::Future: Unpin,
+        B: Unpin,
+    {
         let mut conn = Some(self);
-        ::futures::future::poll_fn(move || -> crate::Result<_> {
-            try_ready!(conn.as_mut().unwrap().poll_without_shutdown());
-            Ok(conn.take().unwrap().into_parts().into())
+        futures_util::future::poll_fn(move |cx| {
+            ready!(conn.as_mut().unwrap().poll_without_shutdown(cx))?;
+            Poll::Ready(Ok(conn.take().unwrap().into_parts()))
         })
     }
-    */
 
     fn upgrade_h2(&mut self) {
         trace!("Trying to upgrade connection to h2");

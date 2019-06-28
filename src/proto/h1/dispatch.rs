@@ -82,15 +82,15 @@ where
     ///
     /// This is useful for old-style HTTP upgrades, but ignores
     /// newer-style upgrade API.
-    pub(crate) fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>> {
-        unimplemented!("Dispatcher::poll_without_shutdown");
-        /*
-        self.poll_catch(cx, false).map_ok(|ds| {
+    pub(crate) fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>>
+    where
+        Self: Unpin,
+    {
+        Pin::new(self).poll_catch(cx, false).map_ok(|ds| {
             if let Dispatched::Upgrade(pending) = ds {
                 pending.manual();
             }
         })
-        */
     }
 
     fn poll_catch(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>, should_shutdown: bool) -> Poll<crate::Result<Dispatched>> {

@@ -373,30 +373,33 @@ where
     /// Use [`poll_fn`](https://docs.rs/futures/0.1.25/futures/future/fn.poll_fn.html)
     /// and [`try_ready!`](https://docs.rs/futures/0.1.25/futures/macro.try_ready.html)
     /// to work with this function; or use the `without_shutdown` wrapper.
-    pub fn poll_without_shutdown(&mut self) -> Poll<crate::Result<()>> {
-        unimplemented!("poll_without_shutdown");
-        /*
+    pub fn poll_without_shutdown(&mut self, cx: &mut task::Context<'_>) -> Poll<crate::Result<()>>
+    where
+        B: Unpin,
+    {
         match self.inner.as_mut().expect("already upgraded") {
             &mut Either::Left(ref mut h1) => {
-                h1.poll_without_shutdown()
+                h1.poll_without_shutdown(cx)
             },
             &mut Either::Right(ref mut h2) => {
+                unimplemented!("h2 poll_without_shutdown");
+                /*
                 h2.poll().map(|x| x.map(|_| ()))
+                */
             }
         }
-        */
     }
 
     /// Prevent shutdown of the underlying IO object at the end of service the request,
     /// instead run `into_parts`. This is a convenience wrapper over `poll_without_shutdown`.
-    pub fn without_shutdown(self) -> impl Future<Output=crate::Result<Parts<T>>> {
+    pub fn without_shutdown(self) -> impl Future<Output=crate::Result<Parts<T>>>
+    where
+        B: Unpin,
+    {
         let mut conn = Some(self);
         future::poll_fn(move |cx| -> Poll<crate::Result<Parts<T>>> {
-            unimplemented!("without_shutdown");
-            /*
-            try_ready!(conn.as_mut().unwrap().poll_without_shutdown());
-            Ok(conn.take().unwrap().into_parts().into())
-            */
+            ready!(conn.as_mut().unwrap().poll_without_shutdown(cx))?;
+            Poll::Ready(Ok(conn.take().unwrap().into_parts()))
         })
     }
 }
