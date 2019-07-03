@@ -118,6 +118,16 @@ struct Config {
     ver: Ver,
 }
 
+/// A `Future` that will resolve to an HTTP Response.
+///
+/// This is returned by `Client::request` (and `Client::get`).
+#[must_use = "futures do nothing unless polled"]
+pub struct ResponseFuture {
+    inner: Pin<Box<dyn Future<Output=crate::Result<Response<Body>>> + Send>>,
+}
+
+// ===== impl Client =====
+
 #[cfg(feature = "runtime")]
 impl Client<HttpConnector, Body> {
     /// Create a new Client with the default [config](Builder).
@@ -573,13 +583,7 @@ impl<C, B> fmt::Debug for Client<C, B> {
     }
 }
 
-/// A `Future` that will resolve to an HTTP Response.
-///
-/// This is returned by `Client::request` (and `Client::get`).
-#[must_use = "futures do nothing unless polled"]
-pub struct ResponseFuture {
-    inner: Pin<Box<dyn Future<Output=crate::Result<Response<Body>>> + Send>>,
-}
+// ===== impl ResponseFuture =====
 
 impl ResponseFuture {
     fn new(fut: Box<dyn Future<Output=crate::Result<Response<Body>>> + Send>) -> Self {
@@ -607,6 +611,8 @@ impl Future for ResponseFuture {
         Pin::new(&mut self.inner).poll(cx)
     }
 }
+
+// ===== impl PoolClient =====
 
 // FIXME: allow() required due to `impl Trait` leaking types to this lint
 #[allow(missing_debug_implementations)]
@@ -703,6 +709,8 @@ where
         self.is_http2()
     }
 }
+
+// ===== impl ClientError =====
 
 // FIXME: allow() required due to `impl Trait` leaking types to this lint
 #[allow(missing_debug_implementations)]

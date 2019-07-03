@@ -95,9 +95,13 @@ pub struct Handshake<T, B> {
 /// Yields a `Response` if successful.
 #[must_use = "futures do nothing unless polled"]
 pub struct ResponseFuture {
-    // for now, a Box is used to hide away the internal `B`
-    // that can be returned if canceled
-    inner: Pin<Box<dyn Future<Output=crate::Result<Response<Body>>> + Send>>,
+    inner: ResponseFutureState
+}
+
+enum ResponseFutureState {
+    Waiting(dispatch::Promise<Response<Body>>),
+    // Option is to be able to `take()` it in `poll`
+    Error(Option<crate::Error>),
 }
 
 /// Deconstructed parts of a `Connection`.
@@ -217,24 +221,17 @@ where
     pub fn send_request(&mut self, req: Request<B>) -> ResponseFuture {
         let inner = match self.dispatch.send(req) {
             Ok(rx) => {
-                Either::Left(rx.then(move |res| {
-                    match res {
-                        Ok(Ok(res)) => future::ok(res),
-                        Ok(Err(err)) => future::err(err),
-                        // this is definite bug if it happens, but it shouldn't happen!
-                        Err(_) => panic!("dispatch dropped without returning error"),
-                    }
-                }))
+                ResponseFutureState::Waiting(rx)
             },
             Err(_req) => {
                 debug!("connection was not ready");
                 let err = crate::Error::new_canceled().with("connection was not ready");
-                Either::Right(future::err(err))
+                ResponseFutureState::Error(Some(err))
             }
         };
 
         ResponseFuture {
-            inner: Box::pin(inner),
+            inner,
         }
     }
 
@@ -603,9 +600,20 @@ impl<T, B> fmt::Debug for Handshake<T, B> {
 impl Future for ResponseFuture {
     type Output = crate::Result<Response<Body>>;
 
-    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner).poll(cx)
+        match self.inner {
+            ResponseFutureState::Waiting(ref mut rx) => {
+                Pin::new(rx).poll(cx).map(|res| match res {
+                    Ok(Ok(resp)) => Ok(resp),
+                    Ok(Err(err)) => Err(err),
+                    // this is definite bug if it happens, but it shouldn't happen!
+                    Err(_canceled) => panic!("dispatch dropped without returning error"),
+                })
+            },
+            ResponseFutureState::Error(ref mut err) => {
+                Poll::Ready(Err(err.take().expect("polled after ready")))
+            }
+        }
     }
 }
 
