@@ -41,7 +41,7 @@ tokio-reactor = { git = "https://github.com/tokio-rs/tokio", optional = true }
 tokio-sync = { git = "https://github.com/tokio-rs/tokio" }
 tokio-tcp = { git = "https://github.com/tokio-rs/tokio", optional = true }
 tokio-threadpool = { git = "https://github.com/tokio-rs/tokio", optional = true }
-tokio-timer = { git = "https://github.com/tokio-rs/tokio", optional = true, features = ["interval"] }
+tokio-timer = { git = "https://github.com/tokio-rs/tokio", optional = true }
 want = { git = "https://github.com/seanmonstar/want", branch = "std-future" }
 
 [build-dependencies]
