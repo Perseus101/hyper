@@ -184,20 +184,16 @@ impl Future for OnUpgrade {
     type Output = Result<Upgraded, crate::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        unimplemented!()
-        /*
         match self.rx {
-            Some(ref mut rx) => match Pin::new(rx).poll(cx) {
-                Poll::Pending => Poll::Pending,
-                Ok(Async::Ready(Ok(upgraded))) => Ok(Async::Ready(upgraded)),
-                Ok(Async::Ready(Err(err))) => Err(err),
+            Some(ref mut rx) => Pin::new(rx).poll(cx).map(|res| match res {
+                Ok(Ok(upgraded)) => Ok(upgraded),
+                Ok(Err(err)) => Err(err),
                 Err(_oneshot_canceled) => Err(
                     crate::Error::new_canceled().with(UpgradeExpected(()))
                 ),
-            },
-            None => Err(crate::Error::new_user_no_upgrade()),
+            }),
+            None => Poll::Ready(Err(crate::Error::new_user_no_upgrade())),
         }
-        */
     }
 }
 
