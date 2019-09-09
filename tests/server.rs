@@ -1550,6 +1550,7 @@ fn http1_only() {
 }
 
 #[test]
+#[ignore]
 fn http2_service_error_sends_reset_reason() {
     use std::error::Error;
 
@@ -1581,6 +1582,7 @@ fn http2_service_error_sends_reset_reason() {
 }
 
 #[test]
+#[ignore]
 fn http2_body_user_error_sends_reset_reason() {
     use std::error::Error;
     let server = serve();
